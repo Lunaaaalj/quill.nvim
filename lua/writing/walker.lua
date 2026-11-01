@@ -11,17 +11,24 @@
 --                { row, col, end_row, end_col (1-based rows, 0-based byte
 --                  cols, end exclusive), text, label, note?, suggestions? }
 --   suggestions(S, issue)?   lazily computed suggestions (else issue.suggestions)
+--   later_key(S, issue)?     a stable identity, so `l` can defer the issue
+--                across sessions (without it, `l` isn't offered)
 --   keys         extra actions { lhs, desc, fn(S, issue, W) }
 --   footer       the key hint
 --   empty        message when there's nothing to do
 --   on_finish(S, stopped)?
 --
 -- Common keys: 1-9 / <CR> replace with a suggestion, e type a replacement,
--- s / <Space> skip, u undo the last action, q / <Esc> pause.
+-- s / <Space> skip, l leave for later, u undo the last action, q / <Esc> pause.
+--
+-- Skips last for this audit; "later" is saved (stdpath("state")/writing) and
+-- deferred issues come back on the next run, after the fresh ones, labelled
+-- "later". Fixing one forgets it.
 
 local W = {}
 
 local api = vim.api
+local later = require("writing.issues") -- the persistent "later" set
 local ns = api.nvim_create_namespace("audit_walker") -- highlight of the current issue
 W.ns_skip = api.nvim_create_namespace("audit_walker_skip")
 
@@ -109,7 +116,7 @@ local function build(issue, sugg, width)
   if e + #post < #text then post = post .. "…" end
   if issue.end_row > issue.row then post = "…" end
   add(" " .. pre .. bad .. post, { { "SpellAuditMuted", 0, -1 }, { "SpellAuditBad", 1 + #pre, 1 + #pre + #bad } })
-  add(" " .. (issue.label or ""), { { "SpellAuditMuted", 0, -1 } })
+  add(" " .. (issue.label or "") .. (issue.deferred and " · later" or ""), { { "SpellAuditMuted", 0, -1 } })
   for _, para in ipairs(vim.split(issue.note or "", "\n", { trimempty = true })) do
     for _, l in ipairs(wrap(para, width - 2)) do add(" " .. l) end
   end
@@ -192,14 +199,24 @@ local function render(issue)
   api.nvim_win_set_cursor(S.float, { first, 0 })
 end
 
--- Show the first issue at or after the last position (wrapping around).
+-- Show the first fresh issue at or after the last position (wrapping
+-- around); the deferred ones only when no fresh one is left.
 function W.step()
   if not S then return end
   if not (api.nvim_win_is_valid(S.win) and api.nvim_buf_is_valid(S.buf)) then return finish(true) end
-  local list = vim.tbl_filter(function(it) return not skipped(S.buf, it.row, it.col) end, S.issues(S))
-  table.sort(list, function(a, b) return a.row < b.row or (a.row == b.row and a.col < b.col) end)
-  S.remaining = #list
+  local set = S.later_key and later.later() or {}
+  local fresh, deferred = {}, {}
+  for _, it in ipairs(S.issues(S)) do
+    if not skipped(S.buf, it.row, it.col) then
+      local k = S.later_key and S.later_key(S, it)
+      it.deferred = k ~= nil and set[k] == true
+      table.insert(it.deferred and deferred or fresh, it)
+    end
+  end
+  S.remaining = #fresh + #deferred
+  local list = #fresh > 0 and fresh or deferred
   if #list == 0 then return finish(false) end
+  table.sort(list, function(a, b) return a.row < b.row or (a.row == b.row and a.col < b.col) end)
   local pick = list[1]
   for _, it in ipairs(list) do
     if it.row > S.pos[1] or (it.row == S.pos[1] and it.col >= S.pos[2]) then pick = it break end
@@ -225,12 +242,15 @@ function W.checkpoint()
   end)
 end
 
---- Replace the current issue's range with `text`.
+--- Replace the current issue's range with `text` (a deferred issue is then
+--- no longer "later").
 function W.replace(text)
   local it = S.issue
   local before = W.checkpoint()
   api.nvim_buf_set_text(S.buf, it.row - 1, it.col, it.end_row - 1, it.end_col, vim.split(text, "\n"))
-  W.push({ kind = "fixed", change = before })
+  local k = it.deferred and S.later_key(S, it)
+  if k then later.set_later(k, false) end
+  W.push({ kind = "fixed", change = before, undo = k and function() later.set_later(k, true) end or nil })
 end
 
 local function selected()
@@ -268,6 +288,22 @@ function actions.skip()
   W.step()
 end
 
+-- Leave it for later: saved, and skipped for the rest of this audit.
+function actions.later()
+  local it = S.issue
+  local k = S.later_key and S.later_key(S, it)
+  if not k then return notify("This audit can't keep issues for later; s skips", vim.log.levels.WARN) end
+  local was = later.later()[k]
+  later.set_later(k, true)
+  local id = api.nvim_buf_set_extmark(S.buf, W.ns_skip, it.row - 1, it.col, {})
+  W.push({ kind = "later", undo = function(s)
+    pcall(api.nvim_buf_del_extmark, s.buf, W.ns_skip, id)
+    if not was then later.set_later(k, false) end
+  end })
+  S.pos = { it.row, it.col + 1 }
+  W.step()
+end
+
 function actions.undo()
   local e = table.remove(S.history)
   if not e then return notify("Nothing to undo", vim.log.levels.WARN) end
@@ -289,6 +325,7 @@ function W.keymaps(buf)
   map("e", actions.edit, "type a replacement")
   map("s", actions.skip, "skip")
   map("<Space>", actions.skip, "skip")
+  map("l", actions.later, "leave for later")
   map("u", actions.undo, "undo last action")
   map("q", actions.quit, "stop")
   map("<Esc>", actions.quit, "stop")
@@ -311,8 +348,8 @@ function W.start(source)
   S = vim.tbl_extend("force", {
     win = win, buf = api.nvim_win_get_buf(win),
     pos = { 1, 0 }, history = {}, count = {},
-    order = { "fixed", "skipped", "ignored", "added", "dismissed" },
-    empty = "Nothing to fix", footer = " 1-9 fix · e edit · s skip · u undo · q quit ",
+    order = { "fixed", "discussed", "skipped", "later", "ignored", "added", "dismissed" },
+    empty = "Nothing to fix", footer = " 1-9 fix · e edit · s skip · l later · u undo · q quit ",
   }, source)
   if S.on_start then S.on_start(S) end
   S.total = #S.issues(S)

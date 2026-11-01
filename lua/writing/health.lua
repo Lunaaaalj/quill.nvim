@@ -46,9 +46,25 @@ function M.check()
     h.error("claude.args contains --bare", { "--bare skips keychain reads, so it can't use your login: remove it" })
   end
 
-  h.info(("models: grammar %s/%s, outline %s/%s, rigor %s/%s, assist %s/%s"):format(
-    c.grammar.model, c.grammar.effort, c.outline.model, c.outline.effort,
-    c.rigor.model, c.rigor.effort, c.assist.model, c.assist.effort))
+  local config = require("writing.config")
+  local models = {}
+  for _, t in ipairs(config.TASKS) do
+    local tc = config.task(t)
+    models[#models + 1] = ("%s %s/%s%s"):format(t, tc.model, tc.effort, config.session[t] and " (session)" or "")
+  end
+  h.info("models: " .. table.concat(models, ", "))
+
+  local guide, path = require("writing.prose").profile(0)
+  if path then
+    h.ok("style guide: " .. vim.fn.fnamemodify(path, ":~"))
+    if path:find("/%.nvim/writing%.md$") then
+      h.warn("the style guide is in the old location", { "Move it to STYLE.md so collaborators see it too" })
+    end
+  elseif guide then
+    h.ok("style guide: from the style_guide function")
+  else
+    h.info("no STYLE.md above this file: :Writing conform needs one")
+  end
   if vim.g.writing_health_request ~= true then
     return h.info("Set `vim.g.writing_health_request = true` to also send a one-word test request")
   end

@@ -6,6 +6,7 @@
 --   grammar     grammar audit (+ style), walked like the spell audit;
 --               issues are also diagnostics
 --   outline     reverse outline: summary, role and flags per paragraph
+--   conform     check the text against the rules of your STYLE.md (walk)
 --   rigor       peer review: loose arguments, unsupported or overclaimed
 --               statements, fallacies, inconsistencies (report + walk)
 --   rewrite/ask on the selection or the paragraph under the cursor
@@ -13,9 +14,10 @@
 --
 -- Nothing runs on its own: text only leaves Neovim when you ask. Results are
 -- cached, so repeating a pass only sends what changed. Modules: claude.lua
--- (CLI), prose.lua (paragraphs), issues.lua (quote-anchored findings),
--- walker.lua (the audit float), spell.lua, grammar.lua, rigor.lua,
--- outline.lua, assist.lua. Commands and <Plug> maps: plugin/quill.lua.
+-- (CLI), prose.lua (paragraphs), issues.lua (quote-anchored findings, talk),
+-- walker.lua (the audit float, later), spell.lua, grammar.lua, conform.lua,
+-- rigor.lua, outline.lua, assist.lua. Commands and <Plug> maps:
+-- plugin/quill.lua. Every Claude action takes `o.model` / `o.effort`.
 
 local M = {}
 
@@ -65,30 +67,83 @@ function M.paragraph(o)
   M.grammar(vim.tbl_extend("force", o or {}, { range = { row, row } }))
 end
 
-function M.outline() M.ensure(); require("writing.outline").open() end
+function M.outline(o) M.ensure(); require("writing.outline").open(o) end
 
-function M.rigor() M.ensure(); require("writing.rigor").review() end
+function M.rigor(o) M.ensure(); require("writing.rigor").review(o) end
+
+--- STYLE.md conformance: findings cite the rule they break.
+function M.conform(o) M.ensure(); require("writing.conform").audit(o or {}) end
 
 --- Rewrite / ask: `target` true = the last visual selection, { r1, r2 } = those
 --- lines (1-based), nil = the paragraph under the cursor.
-function M.rewrite(target) M.ensure(); require("writing.assist").rewrite(target) end
+function M.rewrite(target, o) M.ensure(); require("writing.assist").rewrite(target, o) end
 
-function M.ask(target) M.ensure(); require("writing.assist").ask(target) end
+function M.ask(target, o) M.ensure(); require("writing.assist").ask(target, o) end
+
+--- Everything you deferred with `l` in this buffer, in the quickfix list.
+function M.later()
+  M.ensure()
+  local buf = api.nvim_get_current_buf()
+  local items = require("writing.issues").later_items(buf)
+  vim.list_extend(items, require("writing.spell").later_items(buf))
+  table.sort(items, function(a, b) return a.lnum < b.lnum or (a.lnum == b.lnum and a.col < b.col) end)
+  if #items == 0 then
+    return vim.notify("Nothing left for later here", vim.log.levels.INFO, { title = "Writing" })
+  end
+  vim.fn.setqflist({}, " ", { title = "Writing: later", items = items })
+  vim.cmd("copen")
+end
+
+--- Pick the model and effort a task uses for the rest of the session.
+--- `arg` "reset" drops every session override.
+function M.pick_model(arg)
+  local config = require("writing.config")
+  if arg == "reset" then
+    config.session = {}
+    return vim.notify("Model overrides cleared", vim.log.levels.INFO, { title = "Writing" })
+  end
+  local function show(t)
+    local c = config.task(t)
+    return ("%-8s %s / %s%s"):format(t, c.model, c.effort, config.session[t] and "  (session)" or "")
+  end
+  vim.ui.select(config.TASKS, { prompt = "Task", format_item = show }, function(t)
+    if not t then return end
+    vim.ui.select({ "haiku", "sonnet", "opus", "Custom…" }, { prompt = "Model for " .. t }, function(m)
+      if not m then return end
+      local function effort(model)
+        vim.ui.select({ "low", "medium", "high" }, { prompt = "Effort for " .. t }, function(e)
+          if not e then return end
+          config.session[t] = { model = model, effort = e }
+          vim.notify(("%s: %s / %s for this session"):format(t, model, e), vim.log.levels.INFO, { title = "Writing" })
+        end)
+      end
+      if m == "Custom…" then
+        vim.ui.input({ prompt = "Model (alias or full id): " }, function(id)
+          if id and id ~= "" then effort(id) end
+        end)
+      else
+        effort(m)
+      end
+    end)
+  end)
+end
 
 function M.chat() M.ensure(); require("writing.assist").chat() end
 
 function M.toggle_diagnostics()
   M.ensure()
-  local all = { require("writing.grammar").ns_diag, require("writing.outline").ns_diag, require("writing.rigor").ns_diag }
+  local all = { require("writing.grammar").ns_diag, require("writing.conform").ns_diag,
+    require("writing.outline").ns_diag, require("writing.rigor").ns_diag }
   local on = not vim.diagnostic.is_enabled({ ns_id = all[1] })
   for _, ns in ipairs(all) do vim.diagnostic.enable(on, { ns_id = ns }) end
   vim.notify("Writing diagnostics " .. (on and "on" or "off"), vim.log.levels.INFO, { title = "Writing" })
 end
 
---- Clear the AI issues (grammar, rigor, outline flags) of the current buffer.
+--- Clear the AI issues (grammar, conform, rigor, outline flags) of the current buffer.
 function M.clear()
   M.ensure()
   require("writing.grammar").clear()
+  require("writing.conform").store:clear()
   require("writing.rigor").store:clear()
   vim.diagnostic.reset(require("writing.outline").ns_diag, 0)
 end

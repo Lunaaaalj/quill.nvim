@@ -13,7 +13,7 @@ local claude = require("writing.claude")
 
 local M = {}
 
-local function cfg() return require("writing.config").options.assist end
+local function cfg(o) return require("writing.config").task("assist", o) end
 
 local api = vim.api
 local ns = api.nvim_create_namespace("writing_assist")
@@ -96,7 +96,7 @@ local REWRITE_SCHEMA = {
   additionalProperties = false,
 }
 
-local function run_rewrite(range, text, instruction)
+local function run_rewrite(range, text, instruction, c)
   -- anchor the range so edits elsewhere while waiting don't misplace it
   local mark = api.nvim_buf_set_extmark(range.buf, ns, range.r1, range.c1, {
     end_row = range.r2, end_col = range.c2, right_gravity = false, end_right_gravity = true,
@@ -105,7 +105,7 @@ local function run_rewrite(range, text, instruction)
   claude.run({
     prompt = ("Language: %s.\nInstruction: %s\n\n<passage>\n%s\n</passage>"):format(
       prose.language(range.buf), instruction, text),
-    system = REWRITE_SYSTEM, schema = REWRITE_SCHEMA, model = cfg().model, effort = cfg().effort,
+    system = REWRITE_SYSTEM, schema = REWRITE_SCHEMA, model = c.model, effort = c.effort,
   }, function(err, res)
     if err then
       pcall(api.nvim_buf_del_extmark, range.buf, ns, mark)
@@ -139,7 +139,7 @@ local function run_rewrite(range, text, instruction)
       close()
       pcall(api.nvim_buf_del_extmark, range.buf, ns, mark)
       if m[1] then
-        run_rewrite({ buf = range.buf, r1 = m[1], c1 = m[2], r2 = m[3].end_row, c2 = m[3].end_col }, text, instruction)
+        run_rewrite({ buf = range.buf, r1 = m[1], c1 = m[2], r2 = m[3].end_row, c2 = m[3].end_col }, text, instruction, c)
       end
     end, o)
     api.nvim_create_autocmd("BufWipeout", {
@@ -149,18 +149,20 @@ local function run_rewrite(range, text, instruction)
   end)
 end
 
-function M.rewrite(visual)
+--- `o.model` / `o.effort` override the configured ones (as for every pass).
+function M.rewrite(visual, o)
   local range, text = target(visual)
   if not range then return vim.notify("No paragraph here", vim.log.levels.WARN, { title = "Writing" }) end
-  local items = vim.list_extend(vim.deepcopy(cfg().presets), { "Custom…" })
+  local c = cfg(o)
+  local items = vim.list_extend(vim.deepcopy(c.presets), { "Custom…" })
   vim.ui.select(items, { prompt = "Rewrite" }, function(choice)
     if not choice then return end
     if choice == "Custom…" then
       vim.ui.input({ prompt = "Rewrite instruction: " }, function(ins)
-        if ins and ins ~= "" then run_rewrite(range, text, ins) end
+        if ins and ins ~= "" then run_rewrite(range, text, ins, c) end
       end)
     else
-      run_rewrite(range, text, choice)
+      run_rewrite(range, text, choice, c)
     end
   end)
 end
@@ -171,8 +173,9 @@ end
 local ASK_SYSTEM = [[
 You are a thoughtful writing companion: an honest, specific reader of the author's draft. Answer the author's question about the marked passage, using the whole document as context. Be concise and concrete: quote the text you refer to, and suggest specific wording when it helps. Answer in the language of the question. Plain Markdown.]]
 
-function M.ask(visual)
+function M.ask(visual, o)
   local range, text = target(visual)
+  local c = cfg(o)
   if not range then return vim.notify("No paragraph here", vim.log.levels.WARN, { title = "Writing" }) end
   vim.ui.input({ prompt = "Ask about this passage: " }, function(q)
     if not q or q == "" then return end
@@ -182,7 +185,7 @@ function M.ask(visual)
       prose.language(range.buf),
       profile and ("<style_guide>\n" .. profile .. "\n</style_guide>\n") or "",
       document(range.buf), text, q)
-    claude.run({ prompt = prompt, system = ASK_SYSTEM, model = cfg().model, effort = cfg().effort },
+    claude.run({ prompt = prompt, system = ASK_SYSTEM, model = c.model, effort = c.effort },
       function(err, answer)
         if err then return vim.notify(err, vim.log.levels.ERROR, { title = "Writing" }) end
         local _, win = float(vim.split(vim.trim(answer), "\n"),

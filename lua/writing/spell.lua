@@ -5,6 +5,8 @@
 --   R            replace every occurrence of the word with it
 --   e            type the replacement yourself
 --   s / <Space>  skip this one          S  ignore the word (this session)
+--   l            leave it for later (comes back next time, after the rest;
+--                editing its line makes it a fresh issue again)
 --   a            add the word to your spellfile (zg)
 --   u            undo the last action and go back to it
 --   q / <Esc>    stop (`:SpellAudit` again resumes)
@@ -52,6 +54,12 @@ local function issues(S)
     vim.fn.winrestview(view)
     return out
   end)
+end
+
+-- "Later" identity: the word in its line (whitespace collapsed).
+local function later_key(S, it)
+  local line = api.nvim_buf_get_lines(S.buf, it.row - 1, it.row, false)[1] or ""
+  return "spell\31" .. it.text .. "\31" .. require("writing.issues").norm(line)
 end
 
 local function suggestions(S, it)
@@ -109,13 +117,13 @@ function M.start()
   end
   W.start({
     key = "spell", title = "Spell", win = win,
-    issues = issues, suggestions = suggestions,
+    issues = issues, suggestions = suggestions, later_key = later_key,
     keys = {
       { "R", "replace every occurrence", replace_all },
       { "S", "ignore word this session", ignore },
       { "a", "add word to spellfile", add },
     },
-    footer = " 1-9 fix · R all · e edit · s skip · S ignore · a add · u undo · q quit ",
+    footer = " 1-9 fix · R all · e edit · s skip · l later · S ignore · a add · u undo · q quit ",
     empty = "No spelling issues", resume_hint = require("writing").hint("<Plug>(SpellAudit)", ":SpellAudit"),
     on_start = function(S)
       S.spell_was = vim.wo[S.win].spell
@@ -125,6 +133,26 @@ function M.start()
       if not stopped and api.nvim_win_is_valid(S.win) then vim.wo[S.win].spell = S.spell_was end
     end,
   })
+end
+
+--- The spelling issues of `buf` left for later, as quickfix entries (scans the
+--- current window, which must show `buf`).
+function M.later_items(buf)
+  local win = api.nvim_get_current_win()
+  if api.nvim_win_get_buf(win) ~= buf then return {} end
+  local set = require("writing.issues").later()
+  local was = vim.wo[win].spell
+  vim.wo[win].spell = true
+  local S = { win = win, buf = buf }
+  local out = {}
+  for _, it in ipairs(issues(S)) do
+    if set[later_key(S, it)] then
+      out[#out + 1] = { bufnr = buf, lnum = it.row, col = it.col + 1, end_lnum = it.row, end_col = it.end_col + 1,
+        text = "spell: " .. it.text .. " (" .. it.label .. ")" }
+    end
+  end
+  vim.wo[win].spell = was
+  return out
 end
 
 return M

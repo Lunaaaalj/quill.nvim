@@ -10,7 +10,8 @@
 --     issues die), and so is one overlapping an earlier issue.
 --   * Issues are extmarks: they move with your edits, and one whose text no
 --     longer matches its quote (you fixed it) disappears.
---   * `d` in the walker dismisses an issue for good (stdpath("state")).
+--   * `d` in the walker dismisses an issue for good (stdpath("state")), `l`
+--     leaves it for later, `t` talks about it (a new suggestion becomes 1).
 
 local prose = require("writing.prose")
 local claude = require("writing.claude")
@@ -19,7 +20,7 @@ local W = require("writing.walker")
 
 local M = {}
 
-local function cfg() return require("writing.config").options.grammar end
+local function task(o) return require("writing.config").task("grammar", o) end
 
 local api = vim.api
 local bufnr = issues.bufnr
@@ -111,7 +112,7 @@ end
 -- checking
 
 local function para_key(p, ctx)
-  return vim.fn.sha256(table.concat({ cfg().model, cfg().effort, ctx.style and "style" or "errors",
+  return vim.fn.sha256(table.concat({ ctx.c.model, ctx.c.effort, ctx.style and "style" or "errors",
     ctx.lang, ctx.profile or "", table.concat(ctx.glossary, ","), p.text }, "\31"))
 end
 
@@ -129,7 +130,8 @@ local function prompt_for(batch, ctx)
 end
 
 --- Check `buf` (all paragraphs, or those touching rows `range` = {s, e}).
---- `o.style` adds style/clarity hints; cb(n_issues) when done.
+--- `o.style` adds style/clarity hints, `o.model` / `o.effort` override the
+--- configured ones; cb(n_issues) when done.
 function M.check(buf, o, cb)
   buf, o = bufnr(buf), o or {}
   local paras = prose.paragraphs(buf)
@@ -141,7 +143,8 @@ function M.check(buf, o, cb)
     return
   end
   local profile = prose.profile(buf)
-  local ctx = { lang = prose.language(buf), profile = profile, glossary = prose.glossary(buf), style = o.style }
+  local c = task(o)
+  local ctx = { lang = prose.language(buf), profile = profile, glossary = prose.glossary(buf), style = o.style, c = c }
   get_cache()
 
   local keys, todo = {}, {}
@@ -153,7 +156,7 @@ function M.check(buf, o, cb)
   -- batches by size
   local batches, cur, size = {}, {}, 0
   for _, p in ipairs(todo) do
-    if size > 0 and size + #p.text > cfg().chunk_chars then
+    if size > 0 and size + #p.text > c.chunk_chars then
       batches[#batches + 1], cur, size = cur, {}, 0
     end
     cur[#cur + 1] = p
@@ -178,14 +181,14 @@ function M.check(buf, o, cb)
   end
 
   if #batches == 0 then return finish({}) end
-  vim.notify(("Checking %d paragraph%s with %s…"):format(#todo, #todo == 1 and "" or "s", cfg().model),
+  vim.notify(("Checking %d paragraph%s with %s…"):format(#todo, #todo == 1 and "" or "s", c.model),
     vim.log.levels.INFO, { title = "Grammar" })
   local pending, errs = #batches, {}
   local system = SYSTEM:format(o.style and STYLE or "")
   for _, batch in ipairs(batches) do
     claude.run({
       prompt = prompt_for(batch, ctx), system = system, schema = SCHEMA,
-      model = cfg().model, effort = cfg().effort,
+      model = c.model, effort = c.effort,
     }, function(err, res)
       if err then
         errs[#errs + 1] = err
@@ -214,9 +217,12 @@ function M.walk(buf, win)
   buf = bufnr(buf)
   W.start({
     key = "grammar:" .. buf, title = "Grammar", win = win,
-    issues = function(S) return store:items(S.buf) end,
-    keys = { { "d", "dismiss this issue for good", store:dismiss_action() } },
-    footer = " 1-3 fix · e edit · s skip · d dismiss · u undo · q quit ",
+    issues = function(S) return store:items(S.buf) end, later_key = store.later_key,
+    keys = {
+      { "d", "dismiss this issue for good", store:dismiss_action() },
+      { "t", "talk about it", store:talk_action() },
+    },
+    footer = " 1-4 fix · e edit · t talk · s skip · l later · d dismiss · u undo · q quit ",
     empty = "No grammar issues", resume_hint = require("writing").hint("<Plug>(WritingGrammar)", ":Writing grammar"),
     on_finish = function(S) store:refresh(S.buf) end,
   })

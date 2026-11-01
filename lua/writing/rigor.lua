@@ -12,7 +12,8 @@
 --   e         edit the passage yourself
 --   m         mark it: insert a TODO comment (in the file's comment syntax)
 --             under the passage, for fixes that need work (a citation, data)
---   s skip · d dismiss for good · u undo · q pause
+--   t         talk about it: your message, Claude's reply, and a new rewording
+--   s skip · l leave for later · d dismiss for good · u undo · q pause
 -- Findings are also diagnostics (source "rigor"). The model can't read your
 -- sources: a citation counts as support, and doubtful facts are flagged as
 -- "verify", never corrected.
@@ -24,7 +25,7 @@ local W = require("writing.walker")
 
 local M = {}
 
-local function cfg() return require("writing.config").options.rigor end
+local function cfg(o) return require("writing.config").task("rigor", o) end
 
 local api = vim.api
 local bufnr = issues.bufnr
@@ -108,8 +109,8 @@ local R = {} -- source buf -> { data, paras, buf (report), win }
 
 local function cache_path() return issues.json_file("cache", "rigor.json") end
 
-local function doc_key(paras, lang, profile)
-  local t = { cfg().model, cfg().effort, lang, profile or "" }
+local function doc_key(c, paras, lang, profile)
+  local t = { c.model, c.effort, lang, profile or "" }
   for _, p in ipairs(paras) do t[#t + 1] = p.text end
   return vim.fn.sha256(table.concat(t, "\31"))
 end
@@ -151,13 +152,14 @@ function M.walk(buf, win)
   buf = bufnr(buf)
   W.start({
     key = "rigor:" .. buf, title = "Rigor", win = win,
-    issues = function(S) return store:items(S.buf) end,
+    issues = function(S) return store:items(S.buf) end, later_key = store.later_key,
     keys = {
       { "m", "mark: insert a TODO comment", mark },
       { "d", "dismiss for good", store:dismiss_action() },
+      { "t", "talk about it", store:talk_action() },
     },
-    order = { "fixed", "marked", "skipped", "dismissed" },
-    footer = " 1 apply · e edit · m TODO · s skip · d dismiss · u undo · q quit ",
+    order = { "fixed", "marked", "discussed", "skipped", "later", "dismissed" },
+    footer = " 1 apply · e edit · m TODO · t talk · s skip · l later · d dismiss · u undo · q quit ",
     empty = "No rigor findings", resume_hint = require("writing").hint("<Plug>(WritingRigor)", ":Writing rigor"),
     on_finish = function(S) store:refresh(S.buf) end,
   })
@@ -287,7 +289,8 @@ function M.review(o)
     return vim.notify("No prose to review", vim.log.levels.WARN, { title = "Rigor" })
   end
   local lang, profile = prose.language(src), prose.profile(src)
-  local key = doc_key(paras, lang, profile)
+  local c = cfg(o)
+  local key = doc_key(c, paras, lang, profile)
   local cache = issues.load(cache_path())
 
   local function show(data)
@@ -309,11 +312,11 @@ function M.review(o)
   parts[#parts + 1] = "\nDocument:\n"
   for _, p in ipairs(paras) do parts[#parts + 1] = ("[p%d]\n%s\n"):format(p.id, p.text) end
 
-  vim.notify(("Reviewing %d paragraphs with %s…"):format(#paras, cfg().model), vim.log.levels.INFO,
+  vim.notify(("Reviewing %d paragraphs with %s…"):format(#paras, c.model), vim.log.levels.INFO,
     { title = "Rigor" })
   claude.run({
     prompt = table.concat(parts, "\n"), system = SYSTEM, schema = SCHEMA,
-    model = cfg().model, effort = cfg().effort,
+    model = c.model, effort = c.effort,
   }, function(err, data)
     if err then return vim.notify(err, vim.log.levels.ERROR, { title = "Rigor" }) end
     cache = issues.load(cache_path())

@@ -187,17 +187,35 @@ function M.language(buf)
   return table.concat(names, " or ")
 end
 
+local warned_legacy = false
+
 --- Your style guide, sent with every request (audience, register, conventions,
---- terms to leave alone): the `style_guide` option, by default the nearest
---- `.nvim/writing.md` above the file. Returns its text and path.
+--- terms to leave alone) and the rulebook of :Writing conform: the
+--- `style_guide` option, by default the nearest STYLE.md (or the older
+--- .nvim/writing.md) above the file. Returns its text and path.
 function M.profile(buf)
   local opt = require("writing.config").options.style_guide
   if not opt then return nil, nil end
   if type(opt) == "function" then return opt(buf) end
+  local names = type(opt) == "table" and opt or { opt }
   local name = api.nvim_buf_get_name(buf)
   local dir = name ~= "" and vim.fs.dirname(name) or vim.fn.getcwd()
-  local f = vim.fs.find(opt, { upward = true, path = dir, type = "file" })[1]
+  -- The nearest directory wins; within one, the list's order. (A name can
+  -- have a directory part, so compare the directory it was found from.)
+  local found = vim.fs.find(names, { upward = true, path = dir, type = "file", limit = math.huge })
+  local f, best
+  for _, n in ipairs(names) do
+    for _, path in ipairs(found) do
+      local base = path:sub(-#n - 1) == "/" .. n and path:sub(1, -#n - 2)
+      if base and (not best or #base > #best) then f, best = path, base end
+    end
+  end
   if not f then return nil, nil end
+  if not warned_legacy and f:find("/%.nvim/writing%.md$") then
+    warned_legacy = true
+    vim.notify(("Using %s. Move it to STYLE.md at the project root so collaborators see it too.")
+      :format(vim.fn.fnamemodify(f, ":~:.")), vim.log.levels.INFO, { title = "Writing" })
+  end
   return table.concat(vim.fn.readfile(f), "\n"), f
 end
 

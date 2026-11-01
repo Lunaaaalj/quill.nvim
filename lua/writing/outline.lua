@@ -12,7 +12,7 @@ local claude = require("writing.claude")
 
 local M = {}
 
-local function cfg() return require("writing.config").options.outline end
+local function cfg(o) return require("writing.config").task("outline", o) end
 
 local api = vim.api
 local ns = api.nvim_create_namespace("writing_outline")
@@ -104,8 +104,8 @@ local function load_cache()
   return ok and type(v) == "table" and v or {}
 end
 
-local function doc_key(paras, lang, profile)
-  local t = { cfg().model, cfg().effort, lang, profile or "" }
+local function doc_key(c, paras, lang, profile)
+  local t = { c.model, c.effort, lang, profile or "" }
   for _, p in ipairs(paras) do t[#t + 1] = p.text end
   return vim.fn.sha256(table.concat(t, "\31"))
 end
@@ -285,7 +285,8 @@ function M.open(o)
     return vim.notify("Not enough prose for an outline", vim.log.levels.WARN, { title = "Outline" })
   end
   local lang, profile = prose.language(src), prose.profile(src)
-  local key = doc_key(paras, lang, profile)
+  local c = cfg(o)
+  local key = doc_key(c, paras, lang, profile)
   local cache = load_cache()
 
   P[src] = P[src] or {}
@@ -310,11 +311,11 @@ function M.open(o)
   parts[#parts + 1] = "\nDocument:\n"
   for _, p in ipairs(paras) do parts[#parts + 1] = ("[p%d]\n%s\n"):format(p.id, p.text) end
 
-  vim.notify(("Outlining %d paragraphs with %s…"):format(#paras, cfg().model), vim.log.levels.INFO,
+  vim.notify(("Outlining %d paragraphs with %s…"):format(#paras, c.model), vim.log.levels.INFO,
     { title = "Outline" })
   claude.run({
     prompt = table.concat(parts, "\n"), system = SYSTEM, schema = SCHEMA,
-    model = cfg().model, effort = cfg().effort,
+    model = c.model, effort = c.effort,
   }, function(err, data)
     if err then return vim.notify(err, vim.log.levels.ERROR, { title = "Outline" }) end
     cache = load_cache()

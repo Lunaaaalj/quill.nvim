@@ -1,4 +1,5 @@
--- Quote-anchored issues, shared by the grammar audit and the rigor review.
+-- Quote-anchored issues, shared by the grammar audit, the STYLE.md check and
+-- the rigor review.
 --
 -- Claude answers with verbatim quotes per paragraph; `store:anchor()` finds
 -- each in its paragraph (prose.locate), drops what isn't there (that's how
@@ -7,6 +8,11 @@
 -- equals the quote: fixed ones vanish and `u` (extmark undo_restore) brings
 -- them back. Every store mirrors its items as diagnostics in its own
 -- namespace, and remembers dismissals in stdpath("state")/writing.
+--
+-- A finding's `key` is fixed when it's anchored (store, quote, first
+-- suggestion, issue): dismissals and "later" use it, so they survive a talk
+-- (`t`) that replaces the suggestions. This file also keeps the "later" set
+-- the walker uses, and the talk action.
 
 local prose = require("writing.prose")
 
@@ -37,6 +43,18 @@ local dismissed
 local function get_dismissed()
   dismissed = dismissed or I.load(I.json_file("state", "dismissed.json"))
   return dismissed
+end
+
+-- Items left for later (walker `l`): key -> true, in stdpath("state").
+local later
+function I.later()
+  later = later or I.load(I.json_file("state", "later.json"))
+  return later
+end
+
+function I.set_later(key, on)
+  I.later()[key] = on or nil
+  I.save(I.json_file("state", "later.json"), later)
 end
 
 local Store = {}
@@ -100,9 +118,12 @@ function Store:items(buf)
       local ok, text = pcall(api.nvim_buf_get_text, buf, r1, c1, r2, c2, {})
       text = ok and table.concat(text, "\n") or ""
       if norm(text) == norm(f.quote) and norm(text) ~= "" then
+        local note = self.o.note(f)
+        local last = f.talk and f.talk[#f.talk]
+        if last then note = note .. "\n› " .. last.reply end
         out[#out + 1] = vim.tbl_extend("force", f, {
           idx = idx, row = r1 + 1, col = c1, end_row = r2 + 1, end_col = c2, text = text,
-          label = self.o.label(f), note = self.o.note(f),
+          label = self.o.label(f), note = note,
         })
       end
     end
@@ -176,7 +197,8 @@ function Store:anchor(buf, paras, by_para)
             break
           end
         end
-        if not clash and not (self.o.need_fix and #f.suggestions == 0) and not dis[self:dismiss_key(f)] then
+        f.key = self:dismiss_key(f)
+        if not clash and not (self.o.need_fix and #f.suggestions == 0) and not dis[f.key] then
           range.issue = f.issue
           taken[#taken + 1] = range
           f.mark = api.nvim_buf_set_extmark(buf, self.ns, r1 - 1, c1, {
@@ -197,7 +219,7 @@ end
 --- Walker key: dismiss the finding for good (undoable).
 function Store:dismiss_action()
   return function(S, it, W)
-    local k = self:dismiss_key(it)
+    local k = it.key
     local f = self.B[S.buf].items[it.idx]
     get_dismissed()[k] = true
     I.save(I.json_file("state", "dismissed.json"), dismissed)
@@ -216,5 +238,97 @@ end
 
 --- The finding behind a walker item.
 function Store:finding(buf, it) return self.B[I.bufnr(buf)].items[it.idx] end
+
+--- Walker source field: the identity "later" remembers an item by.
+function Store.later_key(_, it) return it.key end
+
+--- The deferred items of `buf` across every store, as quickfix entries.
+function I.later_items(buf)
+  buf = I.bufnr(buf)
+  local set, out = I.later(), {}
+  for _, s in ipairs(stores) do
+    for _, it in ipairs(s:items(buf)) do
+      if set[it.key] then
+        out[#out + 1] = {
+          bufnr = buf, lnum = it.row, col = it.col + 1, end_lnum = it.end_row, end_col = it.end_col + 1,
+          text = s.o.source .. ": " .. s.o.message(it):gsub("\n", " "),
+        }
+      end
+    end
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
+-- talk: discuss a finding, get a new suggestion
+
+local TALK_SYSTEM = [[
+You are the editor who made a finding about a passage of the author's draft, now discussing it with the author. Reply to the author's latest message honestly and briefly (under sixty words): explain, concede when they are right, or adjust your advice. Don't flatter.
+
+suggestion: a new replacement for exactly the passage at issue that takes the conversation into account, keeping its markup, citations and language. Give one whenever a change to the text still makes sense, including when the author asks for a different kind of change. Give "" only when you now agree the passage should stay as written.]]
+
+local TALK_SCHEMA = {
+  type = "object",
+  properties = { reply = { type = "string" }, suggestion = { type = "string" } },
+  required = { "reply", "suggestion" },
+  additionalProperties = false,
+}
+
+local function talk_prompt(buf, it, f, msg)
+  local p = prose.at(prose.paragraphs(buf), it.row)
+  local guide = prose.profile(buf)
+  local parts = { "Language: " .. prose.language(buf) .. "." }
+  if guide then parts[#parts + 1] = "\nThe author's style guide:\n<style_guide>\n" .. guide .. "\n</style_guide>" end
+  parts[#parts + 1] = "\n<paragraph>\n" .. (p and p.text or it.text) .. "\n</paragraph>"
+  parts[#parts + 1] = "\nPassage at issue:\n<passage>" .. it.text .. "</passage>"
+  parts[#parts + 1] = "\nYour finding: " .. (f.issue or "")
+  if f.rule then parts[#parts + 1] = "Rule: " .. f.rule end
+  if f.fix then parts[#parts + 1] = "Suggested fix: " .. f.fix end
+  if #f.suggestions > 0 then
+    parts[#parts + 1] = "Your current suggestions:"
+    for i, s in ipairs(f.suggestions) do parts[#parts + 1] = ("%d. %s"):format(i, s) end
+  end
+  parts[#parts + 1] = "\nConversation:"
+  for _, t in ipairs(f.talk or {}) do
+    parts[#parts + 1] = "Author: " .. t.user
+    parts[#parts + 1] = "You: " .. t.reply
+  end
+  parts[#parts + 1] = "Author: " .. msg
+  return table.concat(parts, "\n")
+end
+
+--- Walker key: talk about the finding. The reply shows in the float; a new
+--- suggestion becomes 1 (the earlier ones follow). `u` takes it back.
+function Store:talk_action()
+  return function(S, it, W)
+    local f = self:finding(S.buf, it)
+    vim.ui.input({ prompt = "Talk: " }, function(msg)
+      if not msg or vim.trim(msg) == "" or not f then return end
+      local c = require("writing.config").task("talk")
+      vim.notify("Thinking…", vim.log.levels.INFO, { title = S.title })
+      require("writing.claude").run({
+        prompt = talk_prompt(S.buf, it, f, msg), system = TALK_SYSTEM, schema = TALK_SCHEMA,
+        model = c.model, effort = c.effort,
+      }, function(err, res)
+        if err then return vim.notify(err, vim.log.levels.ERROR, { title = S.title }) end
+        local before = { suggestions = f.suggestions, talk = f.talk }
+        f.talk = vim.list_extend(vim.deepcopy(f.talk or {}), { { user = msg, reply = res.reply or "" } })
+        local new = res.suggestion
+        if type(new) == "string" and new ~= "" and norm(new) ~= norm(f.quote) then
+          local rest = vim.tbl_filter(function(s) return s ~= new end, f.suggestions)
+          f.suggestions = vim.list_slice(vim.list_extend({ new }, rest), 1, 4)
+        end
+        -- still walking this finding: record it (for `u`) and show it
+        local cur = W.current()
+        if cur == S and not S.paused and S.issue and S.issue.idx == it.idx then
+          W.push({ kind = "discussed", undo = function() f.suggestions, f.talk = before.suggestions, before.talk end })
+          W.step()
+        else
+          vim.notify("Reply ready: " .. (res.reply or ""), vim.log.levels.INFO, { title = S.title })
+        end
+      end)
+    end)
+  end
+end
 
 return I
