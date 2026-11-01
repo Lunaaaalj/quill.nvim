@@ -350,6 +350,206 @@ test(":Writing rejects unknown subcommands, completes known ones", function()
 end)
 
 -- ---------------------------------------------------------------------------
+-- models: setup < session < per run
+
+test("config.task: setup < session override < per-run model/effort", function()
+  local c = require("writing.config")
+  c.setup({ rigor = { model = "sonnet" } })
+  eq(c.task("rigor").model, "sonnet")
+  c.session.rigor = { model = "opus", effort = "low" }
+  c.setup({}) -- setup() keeps session overrides
+  eq(c.task("rigor").model, "opus")
+  eq(c.task("rigor", { effort = "high" }).effort, "high")
+  eq(c.task("rigor", { effort = "high" }).width, 64, "other options pass through")
+  c.session = {}
+  eq(c.task("rigor").model, "haiku")
+  eq(c.task("conform").model, "sonnet", "conform defaults to a stronger model")
+end)
+
+test(":Writing grammar model=… effort=… reaches claude; bad args are rejected", function()
+  buf_with({ "A paragraph for the model override test." })
+  local seen
+  reply = function(o) seen = o; return { issues = {} } end
+  vim.cmd("Writing grammar model=opus effort=high")
+  eq({ seen.model, seen.effort }, { "opus", "high" })
+  local msg
+  local notify = vim.notify
+  vim.notify = function(m) msg = m end
+  vim.cmd("Writing grammar fast")
+  vim.notify = notify
+  eq(msg, "quill: expected model=… or effort=…, got fast")
+  eq(vim.fn.getcompletion("Writing rigor mo", "cmdline"), { "model=haiku", "model=opus", "model=sonnet" })
+  eq(vim.fn.getcompletion("Writing model ", "cmdline"), { "reset" })
+end)
+
+-- ---------------------------------------------------------------------------
+-- STYLE.md
+
+test("prose.profile: STYLE.md over .nvim/writing.md; the nearest directory wins", function()
+  local dir = tmp .. "/styleproj"
+  vim.fn.mkdir(dir .. "/.nvim", "p")
+  vim.fn.mkdir(dir .. "/sub/.nvim", "p")
+  vim.fn.writefile({ "root STYLE" }, dir .. "/STYLE.md")
+  vim.fn.writefile({ "root legacy" }, dir .. "/.nvim/writing.md")
+  local buf = buf_with({ "x" })
+  api.nvim_buf_set_name(buf, dir .. "/doc.md")
+  eq(prose.profile(buf), "root STYLE", "same directory: STYLE.md first")
+  vim.fn.writefile({ "sub legacy" }, dir .. "/sub/.nvim/writing.md")
+  local b2 = buf_with({ "x" })
+  api.nvim_buf_set_name(b2, dir .. "/sub/doc.md")
+  eq(prose.profile(b2), "sub legacy", "a nearer directory wins over the list order")
+  require("writing.config").setup({ style_guide = { "GUIDE.md" } })
+  eq(prose.profile(buf), nil, "a list option replaces the default list")
+  require("writing.config").setup({})
+end)
+
+-- ---------------------------------------------------------------------------
+-- conform
+
+local conform_dir = tmp .. "/conform"
+vim.fn.mkdir(conform_dir, "p")
+vim.fn.writefile({ "# House style", "", "- Use the active voice.", "- Write numbers under ten as words." },
+  conform_dir .. "/STYLE.md")
+
+local function conform_buf(lines)
+  local buf = buf_with(lines)
+  api.nvim_buf_set_name(buf, conform_dir .. "/doc" .. buf .. ".md")
+  return buf
+end
+
+test("conform: no style guide, no request", function()
+  local buf = buf_with({ "Some prose without a guide anywhere." })
+  api.nvim_buf_set_name(buf, tmp .. "/noguide/doc.md")
+  calls = 0
+  local msg
+  local notify = vim.notify
+  vim.notify = function(m) msg = m end
+  require("writing.conform").check(buf, {}, function() error("must not finish") end)
+  vim.notify = notify
+  eq(calls, 0)
+  eq(msg:find("No STYLE.md", 1, true) ~= nil, true)
+end)
+
+test("conform: invented rules are dropped; accept with 1; cached", function()
+  local buf = conform_buf({ "The ball was thrown by the boy, 3 times." })
+  calls = 0
+  reply = function(o)
+    eq(o.model, "sonnet")
+    eq(o.prompt:find("Use the active voice.", 1, true) ~= nil, true, "the guide is in the prompt")
+    return { issues = {
+      { p = 1, quote = "The ball was thrown by the boy", rule = "Use the active voice.", issue = "passive",
+        suggestions = { "The boy threw the ball" }, severity = "violation" },
+      { p = 1, quote = "3 times", rule = "Never use digits.", issue = "invented rule",
+        suggestions = { "three times" }, severity = "violation" },
+    } }
+  end
+  vim.cmd("Writing conform")
+  eq(W.current().title, "Conform")
+  eq(W.current().remaining, 1, "the finding citing a rule not in the guide is gone")
+  eq(W.current().issue.rule, "Use the active voice.")
+  keys("1")
+  eq(api.nvim_buf_get_lines(buf, 0, 1, false)[1], "The boy threw the ball, 3 times.")
+  calls = 0
+  api.nvim_buf_set_lines(buf, 0, -1, false, { "The ball was thrown by the boy, 3 times." })
+  require("writing.conform").check(buf, {}, function() end)
+  eq(calls, 0, "unchanged paragraph and guide: served from the cache")
+end)
+
+-- ---------------------------------------------------------------------------
+-- later
+
+local function two_issues(a, b)
+  return function()
+    return { issues = {
+      { p = 1, quote = a[1], suggestions = { a[2] }, issue = "first", category = "grammar", severity = "error" },
+      { p = 1, quote = b[1], suggestions = { b[2] }, issue = "second", category = "grammar", severity = "error" },
+    } }
+  end
+end
+
+test("later: l saves it; the next run walks fresh issues first, then the deferred one", function()
+  local buf = buf_with({ "Me and him goes to the park on sundays." })
+  reply = two_issues({ "Me and him goes", "He and I go" }, { "sundays", "Sundays" })
+  vim.cmd("Writing grammar")
+  eq(W.current().issue.text, "Me and him goes")
+  keys("l")
+  eq(W.current().issue.text, "sundays", "deferred: moved on")
+  local key
+  for k in pairs(issues.later()) do key = k end
+  eq(key ~= nil, true, "saved to later.json")
+  keys("s") -- nothing fresh left, and the deferred one is skipped this run: done
+  eq(W.current(), nil)
+
+  vim.cmd("Writing grammar")
+  eq(W.current().issue.text, "sundays", "fresh first")
+  eq(W.current().issue.deferred, false)
+  keys("1")
+  eq(W.current().issue.text, "Me and him goes", "then the deferred one")
+  eq(W.current().issue.deferred, true)
+  eq(api.nvim_buf_get_lines(W.current().fbuf, 1, 2, false)[1]:find("· later", 1, true) ~= nil, true)
+
+  keys("q")
+  eq(api.nvim_get_current_buf(), buf)
+  vim.cmd("Writing later")
+  eq(#vim.fn.getqflist(), 1)
+  vim.cmd("cclose")
+
+  vim.cmd("Writing grammar")
+  keys("1")
+  eq(api.nvim_buf_get_lines(buf, 0, 1, false)[1], "He and I go to the park on Sundays.")
+  eq(W.current(), nil)
+  eq(issues.later()[key], nil, "fixing a deferred issue forgets it")
+end)
+
+test("later: u takes it back", function()
+  buf_with({ "They was here yesterday, wasnt they." })
+  reply = two_issues({ "They was", "They were" }, { "wasnt", "weren't" })
+  vim.cmd("Writing grammar")
+  local n = vim.tbl_count(issues.later())
+  keys("l")
+  eq(vim.tbl_count(issues.later()), n + 1)
+  keys("u")
+  eq(vim.tbl_count(issues.later()), n)
+  eq(W.current().issue.text, "They was")
+  keys("q")
+end)
+
+-- ---------------------------------------------------------------------------
+-- talk
+
+test("talk: the reply shows, the new suggestion becomes 1, u restores; d still works after", function()
+  local buf = buf_with({ "Their going home after the long meeting." })
+  local talk_prompt
+  reply = function(o)
+    if o.schema.properties.reply then
+      talk_prompt = o.prompt
+      eq(o.model, "sonnet", "talk has its own model")
+      return { reply = "Fair: a contraction is less formal.", suggestion = "They are" }
+    end
+    return { issues = { { p = 1, quote = "Their going", suggestions = { "They're going" }, issue = "homophone",
+      category = "grammar", severity = "error" } } }
+  end
+  local input = vim.ui.input
+  vim.ui.input = function(_, cb) cb("no contractions please") end
+  vim.cmd("Writing grammar")
+  keys("t")
+  local S = W.current()
+  eq(S.sugg, { "They are", "They're going" })
+  eq(talk_prompt:find("Author: no contractions please", 1, true) ~= nil, true)
+  local float = table.concat(api.nvim_buf_get_lines(S.fbuf, 0, -1, false), "\n")
+  eq(float:find("› Fair: a contraction is less formal.", 1, true) ~= nil, true)
+  keys("u")
+  eq(W.current().sugg, { "They're going" })
+  keys("t")
+  keys("d")
+  vim.ui.input = input
+  eq(W.current(), nil)
+  local got
+  require("writing.grammar").check(buf, {}, function(n) got = n end)
+  eq(got, 0, "dismissed after a talk: stays dismissed")
+end)
+
+-- ---------------------------------------------------------------------------
 
 io.write(("\n%d passed, %d failed\n"):format(passed, #failed))
 for _, f in ipairs(failed) do io.write("\nFAIL " .. f .. "\n") end
