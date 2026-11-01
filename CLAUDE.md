@@ -1,0 +1,46 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+quill.nvim is a Neovim (≥ 0.10) proofreading plugin written in pure Lua (LuaJIT). It has an offline spell audit and Claude-powered passes (grammar/style audit, rigor review, reverse outline, rewrite/ask, chat). The passes run through the `claude` CLI and the user's Claude Code login. There is no API key. **The repo is named quill, but the Lua module is `writing`** (`require("writing")`, `lua/writing/`, `:checkhealth writing`, help tag `quill`).
+
+## Commands
+
+- `make test` runs the whole suite headless (`nvim --headless --clean -c "luafile tests/run.lua"`) with throwaway XDG dirs. The exit code is non-zero on failure. There are no dependencies.
+- There is no per-test filter. To focus on one test, temporarily comment out the others in `tests/run.lua`, or run the `nvim --headless --clean -c "luafile tests/run.lua"` line from the Makefile directly.
+- There is no linter or formatter config beyond `.luarc.json` (LuaJIT runtime, `vim` global) for lua-language-server.
+
+## Tests
+
+`tests/run.lua` is one file with a tiny `test(name, fn)` / `eq(got, expected)` harness. Each test starts with `%bwipeout!`. Things to know when adding tests:
+- `claude.run` is replaced by a stub that answers from the mutable `reply(o)` function and counts calls in `calls`. Set `reply` to return the JSON a pass expects. Nothing ever shells out to `claude`.
+- `keys(k)` feeds keys with mode `"x"`, so walker mappings run synchronously.
+- `buf_with(lines, ft)` makes a scratch buffer. `vim.notify` is silenced.
+- Tests that call `require("writing.config").setup({...})` must reset it with `setup({})` afterwards.
+
+## Architecture
+
+**Entry points.** `plugin/quill.lua` defines `:Writing {sub}`, `:SpellAudit` and every `<Plug>(…)` map. It binds no keys and does nothing else at startup. Everything goes through `require("writing")` (`init.lua`), whose actions call `M.ensure()`, which lazily runs `setup()` (autocmds for issues/outline/rigor) on first use. `setup()` is optional and safe to call more than once.
+
+**Config.** `config.lua` deep-merges opts over `M.defaults`. Lists replace rather than merge. Modules read `require("writing.config").options.<section>` *at call time* through a local `cfg()` helper, never caching it at load time, so option changes apply on the next run. Keep this pattern.
+
+**Claude transport (`claude.lua`).** `M.run({prompt, system, schema?, model?, effort?}, cb)` runs `claude -p --output-format json --tools "" --no-session-persistence --system-prompt …`, sending the prompt on stdin. With `schema`, it passes `--json-schema` and returns `structured_output`. Jobs are queued and capped at `claude.max_jobs`. Requests run in an empty cwd under `stdpath("cache")/writing/cwd` so that no CLAUDE.md gets read into them. **Never use `--bare`**: it skips keychain reads and breaks login auth.
+
+**Pipeline shared by the AI passes:**
+1. `prose.lua` splits the buffer into paragraphs (runs of non-blank lines). It skips non-prose by filetype: Markdown front matter, fences and comments; the LaTeX preamble, math and verbatim envs; Typst `#set`/`#show`/raw/math. It also loads the style guide (`.nvim/writing.md`, found by searching upward), the language (`'spelllang'`) and the glossary (`'spellfile'` words). `prose.locate` finds a quote in a paragraph with whitespace collapsed.
+2. Claude answers with **verbatim quotes** plus replacements and notes.
+3. `issues.lua` stores anchor each quote as an extmark. A quote that isn't found (a hallucination) or that overlaps an earlier one is dropped. `items()` returns only the extmarks whose current text still equals the quote, so fixed issues disappear and `u` brings them back. Each store mirrors its items as `vim.diagnostic` in its own namespace and persists dismissals (`d`) as JSON in `stdpath("state")/writing`.
+4. `walker.lua` is the single audit float used by spell, grammar and rigor. A *source* table supplies `title`, `key`, `buf`/`win`, `issues(S)` (rescanned after every action), optional `suggestions`, extra `keys`, `footer`, `empty`, and `on_finish`. The walker owns the float, highlights, skip, undo and resume. New walk-style features should be built as a walker source.
+
+**Passes.**
+- `spell.lua` (offline): finds issues with `]s` + `spellbadword()`, not by string matching, so it visits exactly what `]s` would (and respects `@nospell`).
+- `grammar.lua`: batches paragraphs into requests of up to `grammar.chunk_chars`. Results are cached per paragraph, keyed on text, model, mode, language and style guide, so a re-run only sends changed paragraphs.
+- `rigor.lua`: whole-document review. It produces a report panel plus a walk, and `m` inserts a `TODO(review)` comment in the file's comment syntax.
+- `outline.lua`: a panel to the right with a role and flags per paragraph. Its flags are also diagnostics.
+- `assist.lua`: rewrite and ask on the selection or the paragraph, shown in floats (accepting is one undo step), and chat in a split (the `chat` hook, else `:terminal claude`).
+
+**Highlights and filetypes.** `hl.lua` defines every group as a `default` link (`SpellAudit*`, `Writing*`), so colorschemes win. It is re-applied on `ColorScheme`. Plugin UI filetypes are `spellaudit`, `writingoutline` and `writingassist`.
+
+**Docs.** User-facing behavior is documented in both `README.md` and `doc/quill.txt` (`:help quill`). Update both when commands, keys or options change. Resume hints come from `require("writing").hint(plug, fallback)`, which shows the user's own mapped key.
