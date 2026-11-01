@@ -1,0 +1,290 @@
+*quill.txt*  Spell audit, and Claude as copy editor, reviewer and reader
+
+==============================================================================
+CONTENTS                                                            *quill*
+
+  1. Introduction ............................. |quill-intro|
+  2. Commands ................................. |quill-commands|
+  3. Mappings ................................. |quill-mappings|
+  4. The audit walker ......................... |quill-walker|
+  5. Spell audit .............................. |quill-spell|
+  6. Grammar audit ............................ |quill-grammar|
+  7. Rigor review ............................. |quill-rigor|
+  8. Reverse outline .......................... |quill-outline|
+  9. Rewrite, ask, chat ....................... |quill-assist|
+ 10. What is sent, and caches ................. |quill-privacy|
+ 11. Configuration ............................ |quill-config|
+ 12. Highlights and filetypes ................. |quill-highlights|
+ 13. Lua API .................................. |quill-api|
+
+==============================================================================
+1. INTRODUCTION                                                *quill-intro*
+
+quill.nvim is a proofreading kit for Markdown, LaTeX, Typst and plain text:
+
+- a spell audit that walks every spelling issue in a float (offline);
+- Claude, a cheap model through the `claude` CLI and your Claude Code login,
+  as a copy editor (grammar), a peer reviewer (rigor), a developmental editor
+  (reverse outline) and a reader (rewrite, ask, chat).
+
+Requirements: Neovim >= 0.10. The Claude features need Claude Code
+(`claude`), logged in. No API key is needed: requests count against your
+Claude plan. Run |:checkhealth| `writing` to verify the setup.
+
+Nothing runs on its own. Text only leaves Neovim when you start a pass.
+
+The Lua module is `writing` (`require("writing")`).
+
+==============================================================================
+2. COMMANDS                                                 *quill-commands*
+
+                                                               *:SpellAudit*
+:SpellAudit             Walk every spelling issue in the buffer. Run it
+                        again after `q` to resume.
+
+                                                                  *:Writing*
+:Writing [grammar]      Grammar audit of the buffer, then walk the issues.
+:Writing style          The same, plus style and clarity hints.
+:Writing paragraph      Grammar audit of the paragraph under the cursor.
+:Writing outline        Reverse outline in a panel on the right.
+:Writing rigor          Rigor review: report panel, then walk the findings.
+:[range]Writing rewrite Rewrite the paragraph under the cursor, or [range]
+                        (from Visual mode: exactly the selection).
+:[range]Writing ask     Ask a question about the paragraph or [range].
+:Writing chat           Companion chat in a vertical split.
+:Writing diagnostics    Toggle the AI diagnostics (grammar, rigor, outline).
+:Writing clear          Clear the AI issues of the current buffer.
+
+==============================================================================
+3. MAPPINGS                                                 *quill-mappings*
+
+No keys are bound. Map the |<Plug>| mappings you want, recursively (a
+non-recursive map to a <Plug> does nothing; lazy.nvim `keys` need
+`remap = true` too): >lua
+
+    vim.keymap.set("n", "<leader>sa", "<Plug>(SpellAudit)", { remap = true })
+    vim.keymap.set("n", "<leader>Wg", "<Plug>(WritingGrammar)", { remap = true })
+    vim.keymap.set({ "n", "x" }, "<leader>Wr", "<Plug>(WritingRewrite)",
+      { remap = true })
+<
+  <Plug>(SpellAudit)            |:SpellAudit|
+  <Plug>(WritingGrammar)        |:Writing| grammar
+  <Plug>(WritingStyle)          |:Writing| style
+  <Plug>(WritingParagraph)      |:Writing| paragraph
+  <Plug>(WritingOutline)        |:Writing| outline
+  <Plug>(WritingRigor)          |:Writing| rigor
+  <Plug>(WritingRewrite)        n: paragraph, x: selection
+  <Plug>(WritingAsk)            n: paragraph, x: selection
+  <Plug>(WritingChat)           |:Writing| chat
+  <Plug>(WritingDiagnostics)    |:Writing| diagnostics
+  <Plug>(WritingClear)          |:Writing| clear
+
+A paused walk tells you how to resume it, using the key you mapped to its
+<Plug> (or the command when there is none).
+
+==============================================================================
+4. THE AUDIT WALKER                                           *quill-walker*
+
+The spell, grammar and rigor audits share one walker. It shows one issue at a
+time in a float under it (above it near the bottom of the window), with the
+issue highlighted in the buffer, and jumps to the next after every action.
+The issues are rescanned after every action, so positions never go stale.
+
+  1-9         replace with that suggestion
+  <CR>        replace with the suggestion under the cursor
+  e           type a replacement
+  s <Space>   skip this one
+  u           undo the last action and go back to it
+  q <Esc>     pause; start the same audit again to resume
+
+`u` is exact: every edit starts a new undo block first, so `u` never reverts
+more than the one action, even when actions come in one burst of input.
+
+==============================================================================
+5. SPELL AUDIT                                                 *quill-spell*
+
+Issues come from |]s| and |spellbadword()|, so they are exactly what `]s`
+visits: treesitter and syntax `@nospell` regions (code blocks, LaTeX
+commands) are left out. 'spell' is turned on for the walk and restored after.
+
+  R     replace every occurrence of the word (whole word, case-sensitive)
+  S     ignore the word this session (|zG|)
+  a     add the word to your 'spellfile' (|zg|)
+
+==============================================================================
+6. GRAMMAR AUDIT                                             *quill-grammar*
+
+The buffer's paragraphs go to the model in a few batched requests. Issues come
+back as verbatim quotes with replacements. A quote that isn't in its
+paragraph is dropped (that is how hallucinated issues die), and so are
+overlapping issues and suggestions that change nothing.
+
+Issues are extmarks: they move with your edits, one whose text no longer
+matches its quote (you fixed it) disappears, and |u| brings it back. They are
+also diagnostics (source `claude`), for |]d|, signs and pickers.
+
+  d     dismiss the issue for good (remembered across sessions)
+
+Paragraphs: runs of non-blank lines. Non-prose is skipped per filetype:
+Markdown/Quarto front matter, code fences and HTML comments; the LaTeX
+preamble, `%` comments, command-only lines, and math and verbatim
+environments; Typst `#set`/`#show`/`#import`/`#let` lines, raw blocks and
+display math. Headings are paragraphs of their own.
+
+The language comes from 'spelllang'. The words in your 'spellfile' are sent
+as a glossary that is never "corrected".
+
+==============================================================================
+7. RIGOR REVIEW                                                *quill-rigor*
+
+A peer review of research writing. The whole document goes in one request, so
+inconsistencies across sections are visible. It reports loose reasoning, not
+grammar: unsupported or overclaimed statements, non-sequiturs, named
+fallacies, inconsistencies, misused statistics, method gaps, undefined terms,
+unfalsifiable vagueness, and facts worth verifying.
+
+The model can't read your sources: a citation counts as support, and doubtful
+facts are flagged as `verify`, never corrected.
+
+The report panel (verdict, strengths, priorities, findings) updates as you
+fix things:
+
+  <CR>  jump to the finding     w  walk the findings
+  r     re-run (ignores the cache)   q  close
+
+In the walk:
+
+  1     apply the suggested rewording, when wording alone fixes it
+  m     insert `TODO(review): …` as a comment under the passage (in the
+        buffer's 'commentstring'), for fixes that need work
+  d     dismiss for good
+
+==============================================================================
+8. REVERSE OUTLINE                                           *quill-outline*
+
+One request for the whole document: a one-line summary, a role (claim,
+evidence, method, …) and flags (unsupported, gap, contradiction,
+undefined-term, …) for every paragraph, plus the thesis as the text argues it
+and document-level notes. Flags are also INFO diagnostics.
+
+  <CR>  jump to the paragraph   ]f [f  next / previous flag
+  r     re-run                  q      close
+
+The entry of the paragraph under the cursor in the source is highlighted as
+you move.
+
+==============================================================================
+9. REWRITE, ASK, CHAT                                         *quill-assist*
+
+Rewrite: pick an instruction (`assist.presets`, or "Custom…"). The result
+shows in a float under the passage: <CR>/`a` accept (one |undo| step), `r`
+try again, `q` cancel.
+
+Ask: a question about the passage, answered with the whole document as
+context, in a Markdown float.
+
+Chat: a Claude Code session in a vertical split, primed to read the file
+(and your style guide) and act as your writing companion. By default it runs
+`claude <prompt>` in a |:terminal|. Set `chat` to use your own (see
+|quill-config|).
+
+==============================================================================
+10. WHAT IS SENT, AND CACHES                                 *quill-privacy*
+
+Each request contains the paragraphs being checked (the whole document for
+outline, rigor and ask), the language, your style guide and your 'spellfile'
+words. It runs as `claude -p` with `--tools ""` (the model has no tools),
+`--no-session-persistence` and its own system prompt, from an empty
+directory under stdpath("cache"), so no CLAUDE.md is read into it.
+
+Style guide: the nearest `.nvim/writing.md` above the file (option
+`style_guide`): audience, register, conventions, terms to leave alone.
+
+Results are cached in stdpath("cache")/writing: grammar per paragraph,
+outline and rigor per document. A cache key covers the text, model, effort,
+mode, language, style guide and glossary, so repeating a pass only sends what
+changed. Dismissals are kept in stdpath("state")/writing.
+
+Don't add `--bare` to `claude.args`: it skips keychain reads, so it can't use
+your Claude Code login.
+
+==============================================================================
+11. CONFIGURATION                                             *quill-config*
+
+`require("writing").setup(opts)` is optional; these are the defaults: >lua
+
+  {
+    claude = {
+      command = "claude",
+      args = {},           -- extra CLI args for every request
+      timeout = 180000,    -- ms per request
+      max_jobs = 3,        -- concurrent requests
+    },
+    grammar = { model = "haiku", effort = "low", chunk_chars = 6000 },
+    outline = { model = "haiku", effort = "high", width = 60 },
+    rigor   = { model = "haiku", effort = "high", width = 64 },
+    assist  = {
+      model = "haiku", effort = "medium",
+      presets = { "More concise", "More formal / academic",
+        "Simpler and plainer", "Active voice",
+        "Smoother flow and transitions", "Fix grammar only",
+        "Translate to English" },   -- a list replaces the default
+      chat_width = 0.4,    -- columns, or a fraction of 'columns'
+    },
+    spell = { suggestions = 9 },
+    style_guide = ".nvim/writing.md", -- or function(buf) -> text, path; or false
+    chat = nil,            -- function(prompt, ctx), see below
+    highlights = {},       -- or a function returning them
+  }
+<
+`chat(prompt, ctx)` starts the companion chat. `ctx.win` is a fresh vertical
+split to fill, `ctx.buf`/`ctx.file` the document. For example, with your own
+terminal manager: >lua
+
+  chat = function(prompt, ctx)
+    require("my_terminals").claude({ win = ctx.win, args = { prompt } })
+  end
+<
+For a stronger reviewer: `rigor = { model = "sonnet" }`.
+
+==============================================================================
+12. HIGHLIGHTS AND FILETYPES                              *quill-highlights*
+
+Every group is a `default` link, so a colorscheme or the `highlights` option
+wins. `highlights` may be a function: it is re-run on every |ColorScheme|,
+so theme-derived colours stay right.
+
+  SpellAuditAccent  Function        suggestion numbers
+  SpellAuditTitle   Title           walker title
+  SpellAuditMuted   Comment         context, labels, footer
+  SpellAuditBad     SpellBad        the issue in the context line
+  SpellAuditWord    Visual          the issue in the buffer
+  SpellAuditSel     CursorLine      selected suggestion
+  WritingTitle      Title           panel and float titles
+  WritingMuted      Comment
+  WritingRole       Function        outline roles, "Fix:"
+  WritingFlag       DiagnosticWarn  outline flags
+  WritingHeading    Title           outline headings
+  WritingCurrent    CursorLine      outline entry under the cursor
+  WritingMajor      DiagnosticWarn  major rigor findings
+  WritingMinor      DiagnosticInfo  minor rigor findings
+
+Filetypes: `spellaudit` (the walker float; its cursorline is the selection),
+`writingoutline` (the outline and rigor panels) and `writingassist` (rewrite
+and ask floats). If your config manages 'cursorline', leave the first two
+alone.
+
+==============================================================================
+13. LUA API                                                       *quill-api*
+
+`require("writing")`:
+
+  setup(opts)              configure (optional)
+  spell()                  |:SpellAudit|
+  grammar({ style?, range? })   range = { first_row, last_row }
+  paragraph()  outline()  rigor()  chat()
+  rewrite(target)  ask(target)  target: true = last visual selection,
+                           { r1, r2 } = lines, nil = paragraph under cursor
+  toggle_diagnostics()  clear()
+
+ vim:tw=78:ts=8:ft=help:norl:
