@@ -7,6 +7,7 @@
 --               issues are also diagnostics
 --   outline     reverse outline: summary, role and flags per paragraph
 --   conform     check the text against the rules of your STYLE.md (walk)
+--   restyle     rewrite every paragraph to follow your STYLE.md (diff walk)
 --   rigor       peer review: loose arguments, unsupported or overclaimed
 --               statements, fallacies, inconsistencies (report + walk)
 --   rewrite/ask on the selection or the paragraph under the cursor
@@ -15,8 +16,9 @@
 -- Nothing runs on its own: text only leaves Neovim when you ask. Results are
 -- cached, so repeating a pass only sends what changed. Modules: claude.lua
 -- (CLI), prose.lua (paragraphs), issues.lua (quote-anchored findings, talk),
--- walker.lua (the audit float, later), spell.lua, grammar.lua, conform.lua,
--- rigor.lua, outline.lua, assist.lua. Commands and <Plug> maps:
+-- walker.lua (the audit float, later), facts.lua (what suggestions may not
+-- invent), spell.lua, grammar.lua, conform.lua, restyle.lua, rigor.lua,
+-- outline.lua, assist.lua. Commands and <Plug> maps:
 -- plugin/quill.lua. Every Claude action takes `o.model` / `o.effort`.
 
 local M = {}
@@ -74,6 +76,31 @@ function M.rigor(o) M.ensure(); require("writing.rigor").review(o) end
 --- STYLE.md conformance: findings cite the rule they break.
 function M.conform(o) M.ensure(); require("writing.conform").audit(o or {}) end
 
+--- STYLE.md paragraph rewrites, walked as diffs.
+function M.restyle(o) M.ensure(); require("writing.restyle").audit(o or {}) end
+
+-- Load every store, so counts and lists see them all.
+local function stores()
+  for _, m in ipairs({ "grammar", "conform", "restyle", "rigor" }) do require("writing." .. m) end
+  return require("writing.issues")
+end
+
+--- The findings that need your input (facts the model may not invent) in
+--- this buffer, in the quickfix list.
+function M.needs()
+  M.ensure()
+  local items = stores().needs_items(api.nvim_get_current_buf())
+  if #items == 0 then
+    return vim.notify("Nothing needs your input here", vim.log.levels.INFO, { title = "Writing" })
+  end
+  table.sort(items, function(a, b) return a.lnum < b.lnum or (a.lnum == b.lnum and a.col < b.col) end)
+  vim.fn.setqflist({}, " ", { title = "Writing: needs your input", items = items })
+  vim.cmd("copen")
+end
+
+--- { needs = n, later = n } for `buf` (default: current), for a statusline.
+function M.counts(buf) return stores().counts(buf or api.nvim_get_current_buf()) end
+
 --- Rewrite / ask: `target` true = the last visual selection, { r1, r2 } = those
 --- lines (1-based), nil = the paragraph under the cursor.
 function M.rewrite(target, o) M.ensure(); require("writing.assist").rewrite(target, o) end
@@ -84,7 +111,7 @@ function M.ask(target, o) M.ensure(); require("writing.assist").ask(target, o) e
 function M.later()
   M.ensure()
   local buf = api.nvim_get_current_buf()
-  local items = require("writing.issues").later_items(buf)
+  local items = stores().later_items(buf)
   vim.list_extend(items, require("writing.spell").later_items(buf))
   table.sort(items, function(a, b) return a.lnum < b.lnum or (a.lnum == b.lnum and a.col < b.col) end)
   if #items == 0 then
@@ -133,17 +160,18 @@ function M.chat() M.ensure(); require("writing.assist").chat() end
 function M.toggle_diagnostics()
   M.ensure()
   local all = { require("writing.grammar").ns_diag, require("writing.conform").ns_diag,
-    require("writing.outline").ns_diag, require("writing.rigor").ns_diag }
+    require("writing.restyle").ns_diag, require("writing.outline").ns_diag, require("writing.rigor").ns_diag }
   local on = not vim.diagnostic.is_enabled({ ns_id = all[1] })
   for _, ns in ipairs(all) do vim.diagnostic.enable(on, { ns_id = ns }) end
   vim.notify("Writing diagnostics " .. (on and "on" or "off"), vim.log.levels.INFO, { title = "Writing" })
 end
 
---- Clear the AI issues (grammar, conform, rigor, outline flags) of the current buffer.
+--- Clear the AI issues (grammar, conform, restyle, rigor, outline flags) of the current buffer.
 function M.clear()
   M.ensure()
   require("writing.grammar").clear()
   require("writing.conform").store:clear()
+  require("writing.restyle").store:clear()
   require("writing.rigor").store:clear()
   vim.diagnostic.reset(require("writing.outline").ns_diag, 0)
 end

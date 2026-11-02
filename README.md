@@ -15,10 +15,13 @@ A proofreading kit for Neovim: a **spell audit** that walks every spelling issue
 
 - **Spell audit** (`:SpellAudit`, offline): every issue `]s` would visit, one at a time. Replace, replace all, ignore, add to the spellfile, skip, and an exact `u`.
 - **Grammar audit** (`:Writing grammar` / `style`): issues come back as verbatim quotes, so hallucinated ones are dropped. They're anchored as extmarks that move with your edits, mirrored as diagnostics, and walked in the same float.
+- **Restyle** (`:Writing restyle`): `rewrite` for every paragraph, with your `STYLE.md` as the instruction. You walk the paragraphs as word diffs, each change listed with its rule.
 - **Style check** (`:Writing conform`): your `STYLE.md` used as a rulebook. Each finding cites the rule it breaks, word for word, and comes with a rewrite you accept, reject, skip, leave for later, or **talk about** (`t`). Talking gets you a reply and a new suggestion. A finding that cites a rule not in your guide is dropped.
 - **Rigor review** (`:Writing rigor`): a peer review of research writing. It flags unsupported or overclaimed statements, fallacies, cross-section inconsistencies, misused statistics and method gaps. You get a report panel plus a walk, where `m` drops a `TODO(review)` comment.
 - **Reverse outline** (`:Writing outline`): summary, role and flags per paragraph, plus the thesis as the text actually argues it.
 - **Rewrite / ask / chat** on the selection or the paragraph under the cursor.
+
+**Nothing made up.** Some rules need facts only you have ("quantify, don't qualify"). A suggestion that brings in a number, citation or placeholder (`X`, `[number]`, `TBD`) your document doesn't contain is withheld. The finding stays, marked **needs input** with what's missing: it's counted in the walker, a `needs-input` diagnostic, listed by `:Writing needs`, and resolved by telling it the facts with `t`.
 
 In every walk, `l` **leaves an issue for later**. It's saved across sessions and comes back after the fresh issues next time; `:Writing later` lists them all.
 
@@ -45,7 +48,8 @@ lazy.nvim:
     { "<leader>sa", "<Plug>(SpellAudit)", remap = true, desc = "Spell audit" },
     { "<leader>Wg", "<Plug>(WritingGrammar)", remap = true, desc = "Grammar audit" },
     { "<leader>WG", "<Plug>(WritingStyle)", remap = true, desc = "Grammar + style audit" },
-    { "<leader>Ws", "<Plug>(WritingConform)", remap = true, desc = "Check against STYLE.md" },
+    { "<leader>Ws", "<Plug>(WritingRestyle)", remap = true, desc = "Restyle paragraphs (STYLE.md)" },
+    { "<leader>WS", "<Plug>(WritingConform)", remap = true, desc = "Check against STYLE.md" },
     { "<leader>Wp", "<Plug>(WritingParagraph)", remap = true, desc = "Grammar audit: paragraph" },
     { "<leader>Wa", "<Plug>(WritingRigor)", remap = true, desc = "Rigor review" },
     { "<leader>Wo", "<Plug>(WritingOutline)", remap = true, desc = "Reverse outline" },
@@ -68,17 +72,19 @@ The module is `writing` (`require("writing").setup(opts)`); `setup()` is optiona
 | `:SpellAudit` | walk every spelling issue (run again to resume) |
 | `:Writing [grammar]` / `style` / `paragraph` | grammar audit (+ style hints) of the buffer / paragraph |
 | `:Writing conform` | check against your STYLE.md: walk the findings |
+| `:Writing restyle` | rewrite paragraphs to follow your STYLE.md: walk the diffs |
 | `:Writing rigor` | rigor review: report panel + walk |
 | `:Writing outline` | reverse outline panel |
 | `:[range]Writing rewrite` / `ask` | on the paragraph, the lines, or the visual selection |
 | `:Writing chat` | companion chat in a split |
 | `:Writing later` | what you left for later, in the quickfix list |
+| `:Writing needs` | findings that need facts from you, in the quickfix list |
 | `:Writing model [reset]` | pick a task's model and effort for this session |
 | `:Writing diagnostics` / `clear` | toggle / clear the AI diagnostics |
 
 Every Claude subcommand takes `model=` and `effort=` for one run: `:Writing rigor model=opus effort=high`.
 
-Walker keys: `1`–`9` / `<CR>` fix, `e` edit, `s` skip, `l` later, `u` undo, `q` pause. Spell adds `R` replace all, `S` ignore, `a` add to spellfile. Grammar, conform and rigor add `d` dismiss for good and `t` talk. Rigor adds `m` TODO comment.
+Walker keys: `1`–`9` / `<CR>` fix, `e` edit, `s` skip, `l` later, `u` undo, `q` pause. Spell adds `R` replace all, `S` ignore, `a` add to spellfile. Grammar, conform, restyle and rigor add `d` dismiss for good and `t` talk. Conform, restyle and rigor add `m` TODO comment.
 
 Every map is a `<Plug>` (see `:help quill-mappings`).
 
@@ -96,7 +102,7 @@ The old location, `.nvim/writing.md`, is still read when there's no `STYLE.md`. 
 
 ## Models
 
-Each task (`grammar`, `conform`, `rigor`, `outline`, `assist`, `talk`) has its own model and effort. Grammar, outline, rigor and assist default to `haiku`; conform and talk default to `sonnet`, because following a rulebook takes more. A run uses the first of these that is set: a `model=`/`effort=` argument on the command, then `:Writing model` (for the session), then `setup()`. Requests count against your own plan, so models are a personal setting rather than a project file. `:checkhealth writing` shows what each task uses.
+Each task (`grammar`, `conform`, `restyle`, `rigor`, `outline`, `assist`, `talk`) has its own model and effort. Grammar, outline, rigor and assist default to `haiku`; conform, restyle and talk default to `sonnet`, because following a rulebook takes more. A run uses the first of these that is set: a `model=`/`effort=` argument on the command, then `:Writing model` (for the session), then `setup()`. Requests count against your own plan, so models are a personal setting rather than a project file. `:checkhealth writing` shows what each task uses.
 
 ## Configuration
 
@@ -105,6 +111,7 @@ require("writing").setup({
   claude = { command = "claude", args = {}, timeout = 180000, max_jobs = 3 },
   grammar = { model = "haiku", effort = "low", chunk_chars = 6000 },
   conform = { model = "sonnet", effort = "medium", chunk_chars = 6000 },
+  restyle = { model = "sonnet", effort = "medium", chunk_chars = 4000 },
   talk    = { model = "sonnet", effort = "low" },
   outline = { model = "haiku", effort = "high", width = 60 },
   rigor   = { model = "haiku", effort = "high", width = 64 },

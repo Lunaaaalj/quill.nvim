@@ -4,10 +4,16 @@
 -- with the shared walker:
 --
 --   1-4 / <CR>   accept that rewrite          e   edit it yourself
---   t            talk about it: ask why, push back or ask for another kind of
---                change; the reply shows in the float and a new rewrite
---                becomes 1
+--   t            talk about it: ask why, push back, ask for another kind of
+--                change, or give the facts it needs; the reply shows in the
+--                float and a new rewrite becomes 1
+--   m            insert a TODO(style) comment under the passage
 --   s skip · l leave for later · d reject for good · u undo · q pause
+--
+--   * Rules like "quantify, don't qualify" need facts only you have. The
+--     model is told not to invent them, and a rewrite that still brings in a
+--     number, citation or placeholder the document doesn't have is withheld
+--     (facts.lua): the finding stays, marked "needs input" (see issues.lua).
 --
 --   * A finding whose quote isn't in its paragraph, or whose rule isn't in
 --     the guide, is dropped: that's how hallucinated findings and invented
@@ -44,8 +50,9 @@ local SCHEMA = {
           issue = { type = "string" },
           suggestions = { type = "array", items = { type = "string" } },
           severity = { type = "string", enum = { "violation", "suggestion" } },
+          needs = { type = "string" },
         },
-        required = { "p", "quote", "rule", "issue", "suggestions", "severity" },
+        required = { "p", "quote", "rule", "issue", "suggestions", "severity", "needs" },
         additionalProperties = false,
       },
     },
@@ -63,6 +70,7 @@ Rules:
 - suggestions: one to three replacements for exactly the quoted span that follow the rule, best first, keeping its meaning, markup, citations and language.
 - issue: how the passage breaks the rule, in under twenty words, in the paragraph's language.
 - severity: violation when the guide states the rule as a requirement, suggestion when it is a preference.
+- Never invent facts. Suggestions may not add any number, date, name, quantity or citation that isn't already in the document, and never placeholders like X, N or [number]. When following the rule needs information only the author has (a figure, a source, a name), give no suggestions and say in needs exactly what the author must supply ("the number of participants"). Otherwise needs is "".
 - p: the paragraph's number.
 - The source is LaTeX, Typst or Markdown. Never touch commands, math, code, citations, labels, references or URLs.
 - Text that follows the guide gets no finding. Returning no issues is a good answer.]]
@@ -181,6 +189,8 @@ function M.check(buf, o, cb)
     end
     local n = anchor(buf, paras, keys, guide)
     local msg = ("%d finding%s against %s"):format(n, n == 1 and "" or "s", vim.fn.fnamemodify(path or "the guide", ":~:."))
+    local needs = #vim.tbl_filter(function(it) return it.needs ~= nil end, store:items(buf))
+    if needs > 0 then msg = msg .. (", %d need%s your input"):format(needs, needs == 1 and "s" or "") end
     if #batches > 0 then msg = msg .. (" (%d new, %d cached)"):format(#todo, #paras - #todo) end
     if #errs > 0 then msg = msg .. "\n" .. table.concat(errs, "\n") end
     vim.notify(msg, #errs > 0 and vim.log.levels.WARN or vim.log.levels.INFO, { title = "Conform" })
@@ -216,6 +226,10 @@ function M.check(buf, o, cb)
   end
 end
 
+M.todo = store:todo_action("style", function(it)
+  return (it.needs and ("needs " .. it.needs .. ". ") or "") .. it.issue .. " (" .. short(it.rule, 60) .. ")"
+end)
+
 function M.walk(buf, win)
   buf = bufnr(buf)
   W.start({
@@ -224,9 +238,10 @@ function M.walk(buf, win)
     keys = {
       { "d", "reject for good", store:dismiss_action() },
       { "t", "talk about it", store:talk_action() },
+      { "m", "insert a TODO comment", M.todo },
     },
-    order = { "fixed", "discussed", "skipped", "later", "dismissed" },
-    footer = " 1-4 accept · e edit · t talk · s skip · l later · d reject · u undo · q quit ",
+    order = { "fixed", "discussed", "marked", "skipped", "later", "dismissed" },
+    footer = " 1-4 accept · e edit · t talk · m TODO · s skip · l later · d reject · u undo · q quit ",
     empty = "Nothing against the style guide",
     resume_hint = require("writing").hint("<Plug>(WritingConform)", ":Writing conform"),
     on_finish = function(S) store:refresh(S.buf) end,

@@ -133,20 +133,9 @@ end
 -- walking
 
 -- Insert "TODO(review): …" as a comment under the passage.
-local function mark(S, it)
-  local f = store:finding(S.buf, it)
-  local cs = vim.bo[S.buf].commentstring
-  if cs == "" or not cs:find("%s", 1, true) then cs = "TODO: %s" end
-  local text = ("TODO(review): %s: %s Fix: %s"):format(it.category, it.issue, it.fix):gsub("\n", " ")
-  local line = api.nvim_buf_get_lines(S.buf, it.end_row - 1, it.end_row, false)[1] or ""
-  local indent = line:match("^%s*")
-  local comment = indent .. cs:gsub("%%s", (text:gsub("%%", "%%%%")))
-  local before = W.checkpoint()
-  api.nvim_buf_set_lines(S.buf, it.end_row, it.end_row, false, { comment })
-  f.handled = true
-  W.push({ kind = "marked", change = before, undo = function() f.handled = false end })
-  W.step()
-end
+local mark = store:todo_action("review", function(it)
+  return ("%s: %s Fix: %s"):format(it.category, it.issue, it.fix)
+end)
 
 function M.walk(buf, win)
   buf = bufnr(buf)

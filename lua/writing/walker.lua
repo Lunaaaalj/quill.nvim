@@ -13,6 +13,11 @@
 --   suggestions(S, issue)?   lazily computed suggestions (else issue.suggestions)
 --   later_key(S, issue)?     a stable identity, so `l` can defer the issue
 --                across sessions (without it, `l` isn't offered)
+--   diff         show suggestion 1 as a word diff of the issue's text (for
+--                paragraph rewrites) instead of a numbered list
+--
+-- An issue with `needs` (the author must supply facts) is counted in the
+-- float's title.
 --   keys         extra actions { lhs, desc, fn(S, issue, W) }
 --   footer       the key hint
 --   empty        message when there's nothing to do
@@ -40,6 +45,30 @@ end
 
 local function skipped(buf, row, col)
   return #api.nvim_buf_get_extmarks(buf, W.ns_skip, { row - 1, col }, { row - 1, col }, {}) > 0
+end
+
+-- Word-level diff of `a` -> `b`: { { word, nil | "del" | "add" }, … }.
+function W.word_diff(a, b)
+  local function words(s)
+    local t = {}
+    for w in (s or ""):gmatch("%S+") do t[#t + 1] = w end
+    return t
+  end
+  local wa, wb = words(a), words(b)
+  local out, ia = {}, 1
+  local function common(upto)
+    while ia <= upto do out[#out + 1] = { wa[ia] }; ia = ia + 1 end
+  end
+  local hunks = vim.diff(table.concat(wa, "\n") .. "\n", table.concat(wb, "\n") .. "\n", { result_type = "indices" })
+  for _, h in ipairs(hunks) do
+    local sa, ca, sb, cb = h[1], h[2], h[3], h[4]
+    common(ca == 0 and sa or sa - 1)
+    for i = sa, sa + ca - 1 do if ca > 0 then out[#out + 1] = { wa[i], "del" } end end
+    for i = sb, sb + cb - 1 do if cb > 0 then out[#out + 1] = { wb[i], "add" } end end
+    if ca > 0 then ia = sa + ca end
+  end
+  common(#wa)
+  return out
 end
 
 local function close_float()
@@ -104,6 +133,36 @@ local function build(issue, sugg, width)
     for _, g in ipairs(groups or {}) do hls[#hls + 1] = { #lines - 1, g[1], g[2], g[3] } end
   end
 
+  if S.diff then
+    add(" " .. (issue.label or "") .. (issue.deferred and " · later" or ""), { { "SpellAuditMuted", 0, -1 } })
+    for _, para in ipairs(vim.split(issue.note or "", "\n", { trimempty = true })) do
+      for _, l in ipairs(wrap(para, width - 2)) do add(" " .. l) end
+    end
+    add("")
+    local first = #lines + 1
+    if #sugg == 0 then
+      add("   no rewrite", { { "SpellAuditMuted", 0, -1 } })
+      return lines, hls, first
+    end
+    -- the paragraph with deletions and additions marked, wrapped
+    local line, groups = " ", {}
+    local function flush()
+      if line ~= " " then add(line, groups) end
+      line, groups = " ", {}
+    end
+    for _, tok in ipairs(W.word_diff(issue.text, sugg[1])) do
+      local w = tok[1]
+      if line ~= " " and vim.fn.strdisplaywidth(line .. " " .. w) > width - 1 then flush() end
+      if line ~= " " then line = line .. " " end
+      if tok[2] then
+        groups[#groups + 1] = { tok[2] == "del" and "WritingDel" or "WritingAdd", #line, #line + #w }
+      end
+      line = line .. w
+    end
+    flush()
+    return lines, hls, first
+  end
+
   -- The issue's first line, trimmed around it.
   local text = api.nvim_buf_get_lines(S.buf, issue.row - 1, issue.row, false)[1] or ""
   local s = issue.col
@@ -152,6 +211,7 @@ local function render(issue)
 
   local width = math.max(vim.fn.strdisplaywidth(S.footer) + 2, 44)
   for _, w in ipairs(S.sugg) do width = math.max(width, vim.fn.strdisplaywidth(w) + 8) end
+  if S.diff then width = 100 end
   width = math.min(width, 100, api.nvim_win_get_width(win) - 2)
   local lines, hls, first = build(issue, S.sugg, width)
   S.first = first
@@ -173,13 +233,14 @@ local function render(issue)
   end
 
   -- Below the issue, or above it when there's no room.
-  local height = #lines
+  local height = math.max(1, math.min(#lines, api.nvim_win_get_height(win) - 4))
   local below = api.nvim_win_call(win, vim.fn.winline) + height + 3 <= api.nvim_win_get_height(win)
   local cfg = {
     relative = "win", win = win, bufpos = { issue.row - 1, issue.col },
     row = below and 1 or 0, col = -2, anchor = below and "NW" or "SW",
     width = width, height = height, border = "rounded", style = "minimal",
-    title = (" %s %d/%d "):format(S.title, done() + 1, done() + S.remaining), title_pos = "left",
+    title = (" %s %d/%d%s "):format(S.title, done() + 1, done() + S.remaining,
+      S.needs > 0 and (" · %d need%s input"):format(S.needs, S.needs == 1 and "s" or "") or ""), title_pos = "left",
     footer = S.footer, footer_pos = "center",
   }
   if S.float and api.nvim_win_is_valid(S.float) then
@@ -214,6 +275,10 @@ function W.step()
     end
   end
   S.remaining = #fresh + #deferred
+  S.needs = 0
+  for _, l in ipairs({ fresh, deferred }) do
+    for _, it in ipairs(l) do if it.needs then S.needs = S.needs + 1 end end
+  end
   local list = #fresh > 0 and fresh or deferred
   if #list == 0 then return finish(false) end
   table.sort(list, function(a, b) return a.row < b.row or (a.row == b.row and a.col < b.col) end)
@@ -254,6 +319,7 @@ function W.replace(text)
 end
 
 local function selected()
+  if S.diff then return S.sugg[1] end
   local i = api.nvim_win_get_cursor(S.float)[1] - S.first + 1
   return S.sugg[i]
 end
@@ -357,5 +423,8 @@ function W.start(source)
 end
 
 function W.current() return S end
+
+--- Pause the running audit (as `q` does).
+function W.pause() finish(true) end
 
 return W

@@ -4,7 +4,7 @@
 local M = {}
 
 M.links = {
-  -- the audit walker (spell, grammar, rigor)
+  -- the audit walker (spell, grammar, conform, restyle, rigor)
   SpellAuditAccent = "Function", -- suggestion numbers
   SpellAuditTitle = "Title", -- float title
   SpellAuditMuted = "Comment", -- context, labels, footer
@@ -20,6 +20,9 @@ M.links = {
   WritingCurrent = "CursorLine", -- outline entry of the paragraph under the cursor
   WritingMajor = "DiagnosticWarn",
   WritingMinor = "DiagnosticInfo",
+  -- restyle diffs in the walker float
+  WritingDel = "DiffDelete",
+  WritingAdd = "DiffAdd",
 }
 
 function M.apply()

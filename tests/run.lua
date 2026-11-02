@@ -550,6 +550,151 @@ test("talk: the reply shows, the new suggestion becomes 1, u restores; d still w
 end)
 
 -- ---------------------------------------------------------------------------
+-- facts: what suggestions may not invent
+
+test("facts.invented: numbers, citations, placeholders; number words match digits", function()
+  local F = require("writing.facts")
+  local doc = "We ran 3 trials with 1,200 people \\cite{smith2020}. See [@doe21]. Mail a@b.com. X-ray, N = 12."
+  eq(F.invented("We ran three trials with 1200 people \\cite{smith2020}.", doc), {})
+  eq(F.invented("We ran 37 trials, X% of [@roe19].", doc), { "19", "37", "@roe19", "X" })
+  eq(F.invented("About [number] people, TBD, XX.", doc), { "TBD", "XX", "[number]" })
+  eq(F.invented("The X-ray and N = 12 stay; one of them.", doc), {}, "X-ray, N = and 'one' aren't flagged")
+  eq(F.lost("See $a+b$ and \\ref{fig:1} at https://x.org.", "See it at https://x.org."), { "\\ref{fig:1}", "$a+b$" })
+end)
+
+-- (each test uses its own paragraph: answers are cached per paragraph)
+local function needs_reply(sugg, needs)
+  return function(o)
+    if o.schema.properties.reply then
+      return { reply = "Thanks, using 37.", suggestion = "37 participants agreed" }
+    end
+    return { issues = { { p = 1, quote = "participants agreed", rule = "Quantify, don't qualify.",
+      issue = "vague quantity", suggestions = sugg, severity = "violation", needs = needs } } }
+  end
+end
+
+local function quantify_buf(text)
+  vim.fn.writefile({ "- Quantify, don't qualify." }, conform_dir .. "/STYLE.md")
+  return conform_buf({ text })
+end
+
+test("needs input: a made-up number is withheld; flagged, counted, listed; talk resolves it", function()
+  local buf = quantify_buf("Many participants agreed with the proposal.")
+  reply = needs_reply({ "42 participants agreed" }, "")
+  vim.cmd("Writing conform")
+  local S = W.current()
+  eq(S.title, "Conform")
+  eq(S.sugg, {}, "the invented 42 is never offered")
+  eq(S.issue.needs ~= nil, true)
+  eq(S.needs, 1, "counted in the walker")
+  local float = table.concat(api.nvim_buf_get_lines(S.fbuf, 0, -1, false), "\n")
+  eq(float:find("needs input", 1, true) ~= nil, true)
+  eq(float:find("Needs your input", 1, true) ~= nil, true)
+  local d = vim.diagnostic.get(buf, { namespace = require("writing.conform").ns_diag })[1]
+  eq({ d.code, d.severity }, { "needs-input", vim.diagnostic.severity.WARN })
+  eq(require("writing").counts(buf).needs, 1)
+
+  local input = vim.ui.input
+  vim.ui.input = function(_, cb) cb("it was 37 of them") end
+  keys("t")
+  vim.ui.input = input
+  eq(W.current().sugg, { "37 participants agreed" }, "a number the author gave is fine")
+  eq(W.current().issue.needs, nil, "resolved")
+  keys("u")
+  eq(W.current().issue.needs ~= nil, true, "u brings the flag back")
+  keys("q")
+  api.nvim_set_current_buf(buf)
+  vim.cmd("Writing needs")
+  eq(#vim.fn.getqflist(), 1)
+  vim.cmd("cclose")
+end)
+
+test("needs input: the model's own `needs`, and m writes a TODO", function()
+  local buf = quantify_buf("Most participants agreed in the end.")
+  reply = needs_reply({}, "the number of participants who agreed")
+  vim.cmd("Writing conform")
+  eq(W.current().issue.needs, "the number of participants who agreed")
+  keys("m")
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  eq(lines[2]:find("TODO(style): needs the number of participants who agreed", 1, true) ~= nil, true)
+end)
+
+test("talk: a reply that makes up a number keeps it out", function()
+  local buf = quantify_buf("Several participants agreed later.")
+  reply = function(o)
+    if o.schema.properties.reply then return { reply = "Sure.", suggestion = "99 participants agreed" } end
+    return needs_reply({}, "how many agreed")(o)
+  end
+  vim.cmd("Writing conform")
+  local input = vim.ui.input
+  vim.ui.input = function(_, cb) cb("make it concrete") end
+  keys("t")
+  vim.ui.input = input
+  eq(W.current().sugg, {})
+  local float = table.concat(api.nvim_buf_get_lines(W.current().fbuf, 0, -1, false), "\n")
+  eq(float:find("withheld: it made up 99", 1, true) ~= nil, true)
+  keys("q")
+  eq(buf ~= nil, true)
+end)
+
+-- ---------------------------------------------------------------------------
+-- restyle
+
+test("restyle: paragraph rewrites walked as a diff; invented rules and lost markup dropped", function()
+  vim.fn.writefile({ "- Use the active voice.", "- Write numbers under ten as words." }, conform_dir .. "/STYLE.md")
+  local buf = conform_buf({
+    "The ball was thrown by the boy 3 times.", "",
+    "The cat was fed by me \\cite{key1}.", "",
+    "Results were obtained by the team.", "",
+    "This one is fine.",
+  })
+  calls = 0
+  reply = function(o)
+    eq(o.model, "sonnet")
+    return { paragraphs = {
+      { p = 1, rewrite = "The boy threw the ball three times.", needs = "", changes = {
+        { rule = "Use the active voice.", change = "active voice" },
+        { rule = "Write numbers under ten as words.", change = "3 -> three" } } },
+      { p = 2, rewrite = "I fed the cat.", needs = "", changes = {
+        { rule = "Use the active voice.", change = "active voice" } } },
+      { p = 3, rewrite = "The team obtained results.", needs = "", changes = {
+        { rule = "Never start with 'The'.", change = "invented" } } },
+    } }
+  end
+  vim.cmd("Writing restyle")
+  local S = W.current()
+  eq(S.title, "Restyle")
+  eq(S.remaining, 1, "p2 lost its citation, p3 cited an invented rule")
+  local float = api.nvim_buf_get_lines(S.fbuf, 0, -1, false)
+  eq(float[1], " 2 changes")
+  local marks = api.nvim_buf_get_extmarks(S.fbuf, -1, 0, -1, { details = true })
+  local groups = {}
+  for _, m in ipairs(marks) do groups[m[4].hl_group] = true end
+  eq(groups.WritingDel and groups.WritingAdd, true, "the diff is highlighted")
+  keys("1")
+  eq(api.nvim_buf_get_lines(buf, 0, 1, false)[1], "The boy threw the ball three times.")
+  eq(W.current(), nil)
+  calls = 0
+  api.nvim_buf_set_lines(buf, 0, 1, false, { "The ball was thrown by the boy 3 times." })
+  require("writing.restyle").check(buf, {}, function() end)
+  eq(calls, 0, "served from the cache (unchanged paragraphs too)")
+end)
+
+test("restyle: a rewrite that makes up a figure is withheld and needs input", function()
+  vim.fn.writefile({ "- Quantify, don't qualify." }, conform_dir .. "/STYLE.md")
+  local buf = conform_buf({ "Many people came to the event." })
+  reply = function()
+    return { paragraphs = { { p = 1, rewrite = "About 250 people came to the event.", needs = "",
+      changes = { { rule = "Quantify, don't qualify.", change = "a number" } } } } }
+  end
+  vim.cmd("Writing restyle")
+  eq(W.current().sugg, {})
+  eq(W.current().issue.needs:find("250", 1, true) ~= nil, true)
+  keys("q")
+  eq(require("writing").counts(buf).needs, 1)
+end)
+
+-- ---------------------------------------------------------------------------
 
 io.write(("\n%d passed, %d failed\n"):format(passed, #failed))
 for _, f in ipairs(failed) do io.write("\nFAIL " .. f .. "\n") end

@@ -22,6 +22,8 @@ M.defaults = {
   },
   -- STYLE.md conformance: following a rulebook needs more than haiku
   conform = { model = "sonnet", effort = "medium", chunk_chars = 6000 },
+  -- STYLE.md paragraph rewrites (rewrite for every paragraph)
+  restyle = { model = "sonnet", effort = "medium", chunk_chars = 4000 },
   -- `t` in the walker: discuss a finding, get a new suggestion
   talk = { model = "sonnet", effort = "low" },
   outline = { model = "haiku", effort = "high", width = 60 },
@@ -61,7 +63,7 @@ M.defaults = {
 M.options = vim.deepcopy(M.defaults)
 
 -- The tasks that call Claude, each with its own model and effort.
-M.TASKS = { "grammar", "conform", "rigor", "outline", "assist", "talk" }
+M.TASKS = { "grammar", "conform", "restyle", "rigor", "outline", "assist", "talk" }
 
 -- `:Writing model` overrides, per task ({ model?, effort? }). Kept until
 -- Neovim exits; setup() doesn't reset them.

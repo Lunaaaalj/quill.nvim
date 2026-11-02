@@ -1,8 +1,9 @@
 -- :SpellAudit                       walk every spelling issue
 -- :Writing [{sub}] [model=… effort=…]
 --                                   grammar (default) | style | paragraph |
---                                   conform | outline | rigor | rewrite | ask |
---                                   chat | later | model | diagnostics | clear
+--                                   conform | restyle | outline | rigor |
+--                                   rewrite | ask | chat | later | needs |
+--                                   model | diagnostics | clear
 -- :[range]Writing rewrite|ask       on those lines (from visual: the selection)
 -- model=/effort= override the configured model for that one run;
 -- :Writing model [reset] picks them per task for the session.
@@ -28,12 +29,14 @@ local subs = {
   style = function(_, a) W().grammar(vim.tbl_extend("force", a, { style = true })) end,
   paragraph = function(_, a) W().paragraph(a) end,
   conform = function(_, a) W().conform(a) end,
+  restyle = function(_, a) W().restyle(a) end,
   outline = function(_, a) W().outline(a) end,
   rigor = function(_, a) W().rigor(a) end,
   rewrite = function(o, a) W().rewrite(target(o), a) end,
   ask = function(o, a) W().ask(target(o), a) end,
   chat = function() W().chat() end,
   later = function() W().later() end,
+  needs = function() W().needs() end,
   model = function(o) W().pick_model(o.fargs[2]) end,
   diagnostics = function() W().toggle_diagnostics() end,
   clear = function() W().clear() end,
@@ -101,6 +104,7 @@ plug("WritingGrammar", function() W().grammar() end, "Writing: grammar audit")
 plug("WritingStyle", function() W().grammar({ style = true }) end, "Writing: grammar + style audit")
 plug("WritingParagraph", function() W().paragraph() end, "Writing: grammar audit of this paragraph")
 plug("WritingConform", function() W().conform() end, "Writing: check against STYLE.md")
+plug("WritingRestyle", function() W().restyle() end, "Writing: rewrite paragraphs to follow STYLE.md")
 plug("WritingOutline", function() W().outline() end, "Writing: reverse outline")
 plug("WritingRigor", function() W().rigor() end, "Writing: rigor review (arguments, claims, evidence)")
 plug("WritingRewrite", function() W().rewrite() end, "Writing: rewrite paragraph")
@@ -109,6 +113,7 @@ plug("WritingAsk", function() W().ask() end, "Writing: ask about paragraph")
 plug("WritingAsk", visual(function(t) W().ask(t) end), "Writing: ask about selection", "x")
 plug("WritingChat", subs.chat, "Writing: companion chat")
 plug("WritingLater", subs.later, "Writing: list what you left for later")
+plug("WritingNeeds", subs.needs, "Writing: list what needs your input")
 plug("WritingModel", function() W().pick_model() end, "Writing: pick models for this session")
 plug("WritingDiagnostics", subs.diagnostics, "Writing: toggle AI diagnostics")
 plug("WritingClear", subs.clear, "Writing: clear AI issues")

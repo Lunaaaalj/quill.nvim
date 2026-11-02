@@ -9,7 +9,7 @@ CONTENTS                                                            *quill*
   4. The audit walker ......................... |quill-walker|
   5. Spell audit .............................. |quill-spell|
   6. Grammar audit ............................ |quill-grammar|
-  7. Style guide and conform .................. |quill-style-guide|
+  7. Style guide, conform and restyle ........ |quill-style-guide|
   8. Rigor review ............................. |quill-rigor|
   9. Reverse outline .......................... |quill-outline|
  10. Rewrite, ask, chat ....................... |quill-assist|
@@ -26,7 +26,8 @@ quill.nvim is a proofreading kit for Markdown, LaTeX, Typst and plain text:
 
 - a spell audit that walks every spelling issue in a float (offline);
 - Claude, through the `claude` CLI and your Claude Code login, as a copy
-  editor (grammar), a house-style checker (conform, against your STYLE.md),
+  editor (grammar), a house-style checker and editor (conform and restyle,
+  against your STYLE.md),
   a peer reviewer (rigor), a developmental editor (reverse outline) and a
   reader (rewrite, ask, chat).
 
@@ -51,6 +52,9 @@ The Lua module is `writing` (`require("writing")`).
 :Writing paragraph      Grammar audit of the paragraph under the cursor.
 :Writing conform        Check the buffer against your STYLE.md, then walk
                         the findings (|quill-style-guide|).
+:Writing restyle        Rewrite every paragraph that goes against your
+                        STYLE.md, then walk the rewrites as diffs
+                        (|quill-restyle|).
 :Writing outline        Reverse outline in a panel on the right.
 :Writing rigor          Rigor review: report panel, then walk the findings.
 :[range]Writing rewrite Rewrite the paragraph under the cursor, or [range]
@@ -59,10 +63,12 @@ The Lua module is `writing` (`require("writing")`).
 :Writing chat           Companion chat in a vertical split.
 :Writing later          Everything you left for later (`l`) in this buffer,
                         in the |quickfix| list.
+:Writing needs          Every finding that needs your input in this buffer
+                        (|quill-needs|), in the quickfix list.
 :Writing model [reset]  Pick the model and effort of a task for this
                         session; `reset` drops the overrides (|quill-models|).
-:Writing diagnostics    Toggle the AI diagnostics (grammar, conform, rigor,
-                        outline).
+:Writing diagnostics    Toggle the AI diagnostics (grammar, conform,
+                        restyle, rigor, outline).
 :Writing clear          Clear the AI issues of the current buffer.
 
 Every Claude subcommand takes `model=` and `effort=` for that one run: >vim
@@ -87,12 +93,14 @@ non-recursive map to a <Plug> does nothing; lazy.nvim `keys` need
   <Plug>(WritingStyle)          |:Writing| style
   <Plug>(WritingParagraph)      |:Writing| paragraph
   <Plug>(WritingConform)        |:Writing| conform
+  <Plug>(WritingRestyle)        |:Writing| restyle
   <Plug>(WritingOutline)        |:Writing| outline
   <Plug>(WritingRigor)          |:Writing| rigor
   <Plug>(WritingRewrite)        n: paragraph, x: selection
   <Plug>(WritingAsk)            n: paragraph, x: selection
   <Plug>(WritingChat)           |:Writing| chat
   <Plug>(WritingLater)          |:Writing| later
+  <Plug>(WritingNeeds)          |:Writing| needs
   <Plug>(WritingModel)          |:Writing| model
   <Plug>(WritingDiagnostics)    |:Writing| diagnostics
   <Plug>(WritingClear)          |:Writing| clear
@@ -103,7 +111,7 @@ A paused walk tells you how to resume it, using the key you mapped to its
 ==============================================================================
 4. THE AUDIT WALKER                                           *quill-walker*
 
-The spell, grammar, conform and rigor audits share one walker. It shows one issue at a
+The spell, grammar, conform, restyle and rigor audits share one walker. It shows one issue at a
 time in a float under it (above it near the bottom of the window), with the
 issue highlighted in the buffer, and jumps to the next after every action.
 The issues are rescanned after every action, so positions never go stale.
@@ -133,6 +141,8 @@ replies with the paragraph, the finding, its rule and the conversation so
 far in view. The reply shows in the float (`›`), and a new suggestion
 becomes `1`, the earlier ones after it. `t` again continues the conversation;
 `u` takes the last turn back. Talk uses the `talk` model (|quill-models|).
+Talk is also how you give a finding the facts it needs (|quill-needs|): a
+number you type counts as yours, one the reply makes up is withheld.
 The conversation lives until the next run of the pass, which starts from the
 original suggestions.
 
@@ -207,10 +217,49 @@ In the walk:
   s / l     skip / leave for later
   d         reject it for good
 
+  m         insert a `TODO(style): …` comment under the passage
+
 Results are cached per paragraph, and the guide is part of the key: editing
 STYLE.md re-checks everything. Conform defaults to `sonnet`: following a
 rulebook is beyond the cheapest model (|quill-models|). Diagnostics have the
 source `conform`.
+
+                                                             *quill-restyle*
+|:Writing| restyle is |quill-assist| rewrite for every paragraph, with the
+guide as the instruction. Claude rewrites the paragraphs that go against the
+guide (only those), listing each change with the rule behind it. The walker
+steps through paragraphs; the float lists the changes and shows the rewrite
+as a word diff (`WritingDel` / `WritingAdd`):
+
+  1 <CR>    accept the rewrite (one undo step)
+  e         accept it and pause there, to finish it by hand
+  t         talk about it ("keep the first sentence"); the rewrite is redone
+  m s l d   TODO comment, skip, later, reject for good
+
+A rewrite is dropped if one of its changes cites a rule that isn't in the
+guide, or if it loses a citation, reference, label, math, code or URL of the
+original. Conform is the finding-by-finding review of the same guide; use
+whichever fits. Restyle has its own model (`restyle`, `sonnet`).
+
+                                                               *quill-needs*
+Some rules need facts only you have: "quantify, don't qualify" with no
+figure in the text. Claude is told never to invent them, and a suggestion
+that still brings in a number, citation key or placeholder (`X`, `N`,
+`[number]`, `TBD`, …) the document doesn't contain is withheld; number words
+count, so "three" for "3" is fine. The finding stays, marked "needs input"
+with what's missing, so you know:
+
+- the walker labels it and counts them in its title (`· 2 need input`);
+- it is a WARN diagnostic with code `needs-input` (find them with |]d|,
+  Trouble, or |:Writing| needs);
+- `require("writing").counts()` gives `{ needs = n, later = n }` for a
+  statusline;
+- `t` with the facts ("it was 37 participants") resolves it, `m` leaves a
+  TODO, `l` keeps it for later.
+
+The same check guards every pass: grammar, rigor, talk and restyle. The
+rewrite float (|quill-assist|) shows a warning line instead of hiding the
+rewrite.
 
 ==============================================================================
 8. RIGOR REVIEW                                                *quill-rigor*
@@ -257,7 +306,8 @@ you move.
 
 Rewrite: pick an instruction (`assist.presets`, or "Custom…"). The result
 shows in a float under the passage: <CR>/`a` accept (one |undo| step), `r`
-try again, `q` cancel.
+try again, `q` cancel. A warning line under it lists any number, citation or
+placeholder the rewrite made up, and any markup it dropped (|quill-needs|).
 
 Ask: a question about the passage, answered with the whole document as
 context, in a Markdown float.
@@ -270,8 +320,8 @@ Chat: a Claude Code session in a vertical split, primed to read the file
 ==============================================================================
 11. MODELS                                                    *quill-models*
 
-Each task has its own model and effort: `grammar`, `conform`, `rigor`,
-`outline`, `assist` (rewrite and ask) and `talk`. The model is an alias
+Each task has its own model and effort: `grammar`, `conform`, `restyle`,
+`rigor`, `outline`, `assist` (rewrite and ask) and `talk`. The model is an alias
 (`haiku`, `sonnet`, `opus`) or a full model id; effort is `--effort`. What a
 run uses, last one wins:
 
@@ -295,8 +345,8 @@ directory under stdpath("cache"), so no CLAUDE.md is read into it.
 
 Style guide: the nearest `STYLE.md` above the file (|quill-style-guide|).
 
-Results are cached in stdpath("cache")/writing: grammar and conform per
-paragraph, outline and rigor per document. A cache key covers the text, model, effort,
+Results are cached in stdpath("cache")/writing: grammar, conform and
+restyle per paragraph, outline and rigor per document. A cache key covers the text, model, effort,
 mode, language, style guide and glossary, so repeating a pass only sends what
 changed. Dismissals and "later" are kept in stdpath("state")/writing.
 
@@ -317,6 +367,7 @@ your Claude Code login.
     },
     grammar = { model = "haiku", effort = "low", chunk_chars = 6000 },
     conform = { model = "sonnet", effort = "medium", chunk_chars = 6000 },
+    restyle = { model = "sonnet", effort = "medium", chunk_chars = 4000 },
     talk    = { model = "sonnet", effort = "low" },
     outline = { model = "haiku", effort = "high", width = 60 },
     rigor   = { model = "haiku", effort = "high", width = 64 },
@@ -368,6 +419,8 @@ so theme-derived colours stay right.
   WritingCurrent    CursorLine      outline entry under the cursor
   WritingMajor      DiagnosticWarn  major rigor findings
   WritingMinor      DiagnosticInfo  minor rigor findings
+  WritingDel        DiffDelete      restyle diff: removed words
+  WritingAdd        DiffAdd         restyle diff: added words
 
 Filetypes: `spellaudit` (the walker float; its cursorline is the selection),
 `writingoutline` (the outline and rigor panels) and `writingassist` (rewrite
@@ -382,10 +435,12 @@ alone.
   setup(opts)              configure (optional)
   spell()                  |:SpellAudit|
   grammar({ style?, range? })   range = { first_row, last_row }
-  conform({ range? })  paragraph()  outline()  rigor()  chat()
+  conform({ range? })  restyle({ range? })  paragraph()  outline()
+  rigor()  chat()
   rewrite(target)  ask(target)  target: true = last visual selection,
                            { r1, r2 } = lines, nil = paragraph under cursor
-  later()  pick_model()  toggle_diagnostics()  clear()
+  later()  needs()  pick_model()  toggle_diagnostics()  clear()
+  counts(buf?)             { needs = n, later = n }, for a statusline
 
 Every Claude action also takes `model` and `effort` in its options table
 (`rigor({ model = "opus" })`; rewrite and ask take them second).

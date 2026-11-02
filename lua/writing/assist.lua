@@ -113,11 +113,23 @@ local function run_rewrite(range, text, instruction, c)
     end
     local lines = vim.split(res.rewrite, "\n")
     local shown = vim.list_extend(vim.deepcopy(lines), { "", "— " .. res.note })
+    -- facts the rewrite made up (numbers, citations, placeholders): say so
+    local facts = require("writing.facts")
+    local inv = facts.invented(res.rewrite,
+      table.concat(api.nvim_buf_get_lines(range.buf, 0, -1, false), "\n") .. "\n" .. instruction)
+    local lost = facts.lost(text, res.rewrite)
+    local warn = {}
+    if #inv > 0 then warn[#warn + 1] = "⚠ made up, not in your text: " .. table.concat(inv, ", ") end
+    if #lost > 0 then warn[#warn + 1] = "⚠ dropped: " .. table.concat(lost, ", ") end
+    vim.list_extend(shown, warn)
     local fbuf, fwin = float(shown, {
       title = " Rewrite · " .. instruction .. " ", footer = " <CR>/a accept · r retry · q cancel ",
       filetype = vim.bo[range.buf].filetype == "" and "writingassist" or vim.bo[range.buf].filetype,
     })
     api.nvim_buf_set_extmark(fbuf, ns, #lines + 1, 0, { end_row = #lines + 2, hl_group = "WritingMuted" })
+    for i = 1, #warn do
+      api.nvim_buf_set_extmark(fbuf, ns, #lines + 1 + i, 0, { end_row = #lines + 2 + i, hl_group = "WritingFlag" })
+    end
     vim.wo[fwin].spell = false
     local function close()
       if api.nvim_win_is_valid(fwin) then api.nvim_win_close(fwin, true) end

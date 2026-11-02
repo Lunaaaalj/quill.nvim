@@ -13,8 +13,16 @@
 -- suggestion, issue): dismissals and "later" use it, so they survive a talk
 -- (`t`) that replaces the suggestions. This file also keeps the "later" set
 -- the walker uses, and the talk action.
+--
+-- Needs input: a suggestion that brings in a number, citation or placeholder
+-- the document doesn't have (facts.lua) is withheld, never offered. The
+-- finding stays, marked `needs` (what the author must supply), so you see it:
+-- it's labelled in the walk, a WARN diagnostic with code "needs-input", in
+-- `:Writing needs`, and counted by I.counts(). Talk (`t`) with the missing
+-- facts resolves it: numbers you type count as known.
 
 local prose = require("writing.prose")
+local facts = require("writing.facts")
 
 local I = {}
 
@@ -119,11 +127,12 @@ function Store:items(buf)
       text = ok and table.concat(text, "\n") or ""
       if norm(text) == norm(f.quote) and norm(text) ~= "" then
         local note = self.o.note(f)
+        if f.needs then note = "Needs your input: " .. f.needs .. "\n" .. note end
         local last = f.talk and f.talk[#f.talk]
         if last then note = note .. "\n› " .. last.reply end
         out[#out + 1] = vim.tbl_extend("force", f, {
           idx = idx, row = r1 + 1, col = c1, end_row = r2 + 1, end_col = c2, text = text,
-          label = self.o.label(f), note = note,
+          label = (f.needs and "needs input · " or "") .. self.o.label(f), note = note,
         })
       end
     end
@@ -138,8 +147,10 @@ function Store:refresh(buf)
   for _, it in ipairs(self:items(buf)) do
     diags[#diags + 1] = {
       lnum = it.row - 1, col = it.col, end_lnum = it.end_row - 1, end_col = it.end_col,
-      severity = self.o.severity[it.severity] or vim.diagnostic.severity.INFO,
-      message = self.o.message(it), source = self.o.source, code = it.category,
+      severity = it.needs and vim.diagnostic.severity.WARN or self.o.severity[it.severity]
+        or vim.diagnostic.severity.INFO,
+      message = (it.needs and ("needs input (" .. it.needs .. "): ") or "") .. self.o.message(it),
+      source = self.o.source, code = it.needs and "needs-input" or it.category,
     }
   end
   vim.diagnostic.set(self.ns_diag, buf, diags)
@@ -180,12 +191,14 @@ function Store:anchor(buf, paras, by_para)
   st.items = keep
 
   local dis, n = get_dismissed(), 0
+  local known = facts.facts(table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
   for _, p in ipairs(paras) do
     local taken, last = {}, {}
     for _, f in ipairs(by_para[p.id] or {}) do
       f.suggestions = vim.tbl_filter(function(s)
         return type(s) == "string" and s ~= "" and norm(s) ~= norm(f.quote)
       end, type(f.suggestions) == "table" and f.suggestions or {})
+      I.check_needs(f, known)
       local r1, c1, r2, c2, be = prose.locate(p, f.quote, last[f.quote])
       if r1 then
         last[f.quote] = be
@@ -198,7 +211,7 @@ function Store:anchor(buf, paras, by_para)
           end
         end
         f.key = self:dismiss_key(f)
-        if not clash and not (self.o.need_fix and #f.suggestions == 0) and not dis[f.key] then
+        if not clash and not (self.o.need_fix and #f.suggestions == 0 and not f.needs) and not dis[f.key] then
           range.issue = f.issue
           taken[#taken + 1] = range
           f.mark = api.nvim_buf_set_extmark(buf, self.ns, r1 - 1, c1, {
@@ -214,6 +227,26 @@ function Store:anchor(buf, paras, by_para)
   end
   self:refresh(buf)
   return n
+end
+
+--- Withhold suggestions that invent facts (numbers, citations, placeholders
+--- not in `known`); if none is left, or the model said so, mark the finding
+--- `needs` (what the author must supply).
+function I.check_needs(f, known)
+  local invented = {}
+  f.suggestions = vim.tbl_filter(function(s)
+    local inv = facts.invented(s, known)
+    vim.list_extend(invented, inv)
+    return #inv == 0
+  end, f.suggestions or {})
+  local said = type(f.needs) == "string" and vim.trim(f.needs) ~= "" and vim.trim(f.needs) or nil
+  f.needs = nil
+  if said then
+    f.needs = said
+  elseif #invented > 0 and #f.suggestions == 0 then
+    f.needs = "facts the text doesn't have (the suggestion made up " .. table.concat(vim.fn.uniq(vim.fn.sort(invented)), ", ") .. ")"
+  end
+  f.withheld = #invented > 0 and vim.fn.uniq(vim.fn.sort(invented)) or nil
 end
 
 --- Walker key: dismiss the finding for good (undoable).
@@ -242,21 +275,62 @@ function Store:finding(buf, it) return self.B[I.bufnr(buf)].items[it.idx] end
 --- Walker source field: the identity "later" remembers an item by.
 function Store.later_key(_, it) return it.key end
 
---- The deferred items of `buf` across every store, as quickfix entries.
-function I.later_items(buf)
+--- Walker key: insert "TODO(<tag>): <text(it)>" as a comment under the
+--- passage (the buffer's 'commentstring'), for fixes that need work.
+function Store:todo_action(tag, text)
+  return function(S, it, W)
+    local f = self:finding(S.buf, it)
+    local cs = vim.bo[S.buf].commentstring
+    if cs == "" or not cs:find("%s", 1, true) then cs = "TODO: %s" end
+    local body = ("TODO(%s): %s"):format(tag, text(it)):gsub("\n", " ")
+    local line = api.nvim_buf_get_lines(S.buf, it.end_row - 1, it.end_row, false)[1] or ""
+    local comment = line:match("^%s*") .. cs:gsub("%%s", (body:gsub("%%", "%%%%")))
+    local before = W.checkpoint()
+    api.nvim_buf_set_lines(S.buf, it.end_row, it.end_row, false, { comment })
+    f.handled = true
+    W.push({ kind = "marked", change = before, undo = function() f.handled = false end })
+    W.step()
+  end
+end
+
+-- Quickfix entries for the items of `buf` that pass `want(it)`, all stores.
+local function qf(buf, want)
   buf = I.bufnr(buf)
-  local set, out = I.later(), {}
+  local out = {}
   for _, s in ipairs(stores) do
     for _, it in ipairs(s:items(buf)) do
-      if set[it.key] then
+      if want(it) then
         out[#out + 1] = {
           bufnr = buf, lnum = it.row, col = it.col + 1, end_lnum = it.end_row, end_col = it.end_col + 1,
-          text = s.o.source .. ": " .. s.o.message(it):gsub("\n", " "),
+          text = s.o.source .. ": " .. (it.needs and ("needs " .. it.needs .. ": ") or "")
+            .. s.o.message(it):gsub("\n", " "),
         }
       end
     end
   end
   return out
+end
+
+--- The findings of `buf` that need your input, as quickfix entries.
+function I.needs_items(buf) return qf(buf, function(it) return it.needs ~= nil end) end
+
+--- How many findings of `buf` need input / are left for later (all stores),
+--- e.g. for a statusline.
+function I.counts(buf)
+  local set, c = I.later(), { needs = 0, later = 0 }
+  for _, s in ipairs(stores) do
+    for _, it in ipairs(s:items(buf)) do
+      if it.needs then c.needs = c.needs + 1 end
+      if set[it.key] then c.later = c.later + 1 end
+    end
+  end
+  return c
+end
+
+--- The deferred items of `buf` across every store, as quickfix entries.
+function I.later_items(buf)
+  local set = I.later()
+  return qf(buf, function(it) return set[it.key] == true end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -265,7 +339,9 @@ end
 local TALK_SYSTEM = [[
 You are the editor who made a finding about a passage of the author's draft, now discussing it with the author. Reply to the author's latest message honestly and briefly (under sixty words): explain, concede when they are right, or adjust your advice. Don't flatter.
 
-suggestion: a new replacement for exactly the passage at issue that takes the conversation into account, keeping its markup, citations and language. Give one whenever a change to the text still makes sense, including when the author asks for a different kind of change. Give "" only when you now agree the passage should stay as written.]]
+suggestion: a new replacement for exactly the passage at issue that takes the conversation into account, keeping its markup, citations and language. Give one whenever a change to the text still makes sense, including when the author asks for a different kind of change. Give "" when you now agree the passage should stay as written.
+
+Never invent facts: no number, date, name or citation that isn't in the paragraph or the author's messages, and no placeholders like X or [number]. If the change needs facts only the author has, ask for them in reply and give "".]]
 
 local TALK_SCHEMA = {
   type = "object",
@@ -273,6 +349,14 @@ local TALK_SCHEMA = {
   required = { "reply", "suggestion" },
   additionalProperties = false,
 }
+
+-- What talk may use: the buffer and everything the author said.
+local function talk_known(buf, f, msg)
+  local t = api.nvim_buf_get_lines(buf, 0, -1, false)
+  for _, turn in ipairs(f.talk or {}) do t[#t + 1] = turn.user end
+  t[#t + 1] = msg
+  return facts.facts(table.concat(t, "\n"))
+end
 
 local function talk_prompt(buf, it, f, msg)
   local p = prose.at(prose.paragraphs(buf), it.row)
@@ -284,6 +368,7 @@ local function talk_prompt(buf, it, f, msg)
   parts[#parts + 1] = "\nYour finding: " .. (f.issue or "")
   if f.rule then parts[#parts + 1] = "Rule: " .. f.rule end
   if f.fix then parts[#parts + 1] = "Suggested fix: " .. f.fix end
+  if f.needs then parts[#parts + 1] = "It needs facts from the author: " .. f.needs end
   if #f.suggestions > 0 then
     parts[#parts + 1] = "Your current suggestions:"
     for i, s in ipairs(f.suggestions) do parts[#parts + 1] = ("%d. %s"):format(i, s) end
@@ -311,20 +396,29 @@ function Store:talk_action()
         model = c.model, effort = c.effort,
       }, function(err, res)
         if err then return vim.notify(err, vim.log.levels.ERROR, { title = S.title }) end
-        local before = { suggestions = f.suggestions, talk = f.talk }
-        f.talk = vim.list_extend(vim.deepcopy(f.talk or {}), { { user = msg, reply = res.reply or "" } })
+        local before = { suggestions = f.suggestions, talk = f.talk, needs = f.needs }
+        local reply = res.reply or ""
         local new = res.suggestion
         if type(new) == "string" and new ~= "" and norm(new) ~= norm(f.quote) then
-          local rest = vim.tbl_filter(function(s) return s ~= new end, f.suggestions)
-          f.suggestions = vim.list_slice(vim.list_extend({ new }, rest), 1, 4)
+          local inv = facts.invented(new, talk_known(S.buf, f, msg))
+          if #inv > 0 then
+            reply = reply .. " [suggestion withheld: it made up " .. table.concat(inv, ", ") .. "]"
+          else
+            local rest = vim.tbl_filter(function(s) return s ~= new end, f.suggestions)
+            f.suggestions = vim.list_slice(vim.list_extend({ new }, rest), 1, 4)
+            f.needs = nil -- the author supplied what was missing
+          end
         end
+        f.talk = vim.list_extend(vim.deepcopy(f.talk or {}), { { user = msg, reply = reply } })
         -- still walking this finding: record it (for `u`) and show it
         local cur = W.current()
         if cur == S and not S.paused and S.issue and S.issue.idx == it.idx then
-          W.push({ kind = "discussed", undo = function() f.suggestions, f.talk = before.suggestions, before.talk end })
+          W.push({ kind = "discussed", undo = function()
+            f.suggestions, f.talk, f.needs = before.suggestions, before.talk, before.needs
+          end })
           W.step()
         else
-          vim.notify("Reply ready: " .. (res.reply or ""), vim.log.levels.INFO, { title = S.title })
+          vim.notify("Reply ready: " .. reply, vim.log.levels.INFO, { title = S.title })
         end
       end)
     end)
