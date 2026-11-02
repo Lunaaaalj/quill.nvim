@@ -27,15 +27,33 @@ local WORDS = {
 local HOLES = { "number", "amount", "value", "figure", "date", "name", "citation", "source", "percentage",
   "year", "ref", "cite", "insert", "n", "x" }
 
+-- Spaces that group thousands: "1 200", with a no-break or (narrow) thin space.
+local GROUP_SPACES = { " ", "\194\160", "\226\128\175", "\226\128\137" }
+
+-- A number's identity is its digits, whatever the separators: 3,5 = 3.5 and
+-- 1.200 = 1,200 = 1 200, so a suggestion that only changes the decimal or
+-- thousands separator (or the locale's convention) brings in nothing new.
+local function num_key(digits)
+  return "#" .. (digits:gsub("^0+(%d)", "%1"))
+end
+
 local function numbers(text, out)
-  -- digits, with thousands separators and decimals: 1,200 / 3.5 / 12
+  for _, sp in ipairs(GROUP_SPACES) do
+    -- join "1 200 000" into one number (only groups of exactly three digits)
+    local prev
+    repeat
+      prev = text
+      text = text:gsub("(%d)" .. sp .. "(%d%d%d)%f[%D]", "%1%2")
+    until text == prev
+  end
+  -- digits, with thousands separators and decimals: 1,200 / 3.5 / 3,5 / 12
   for n in text:gmatch("%d[%d,%.]*") do
-    n = n:gsub("[,%.]+$", ""):gsub(",", "")
-    out["#" .. (tonumber(n) or n)] = n
+    n = n:gsub("[,%.]+$", "")
+    out[num_key((n:gsub("[,%.]", "")))] = n
   end
   for w in text:gmatch("%a+") do
     local v = WORDS[w:lower()]
-    if v then out["#" .. v] = w end
+    if v then out[num_key(tostring(v))] = w end
   end
 end
 

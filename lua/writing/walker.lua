@@ -190,18 +190,67 @@ local function build(issue, sugg, width)
   return lines, hls, first
 end
 
+--- Where the float goes so it never covers the issue: below the issue's last
+--- screen line, or above its first, scrolling `win` when neither has room.
+--- A multi-line issue (a restyle paragraph) is kept whole on screen; when it
+--- and the float can't both fit, the float shrinks (it scrolls) and, as a last
+--- resort, covers the end of the issue. `lines` = the float's content lines.
+--- -> { row, col, anchor, height } for nvim_open_win (relative = "win").
+function W.place(win, issue, lines, width)
+  local wh, ww = api.nvim_win_get_height(win), api.nvim_win_get_width(win)
+  local height = math.max(1, math.min(lines, wh - 4))
+  local h = api.nvim_win_text_height(win, { start_row = issue.row - 1, end_row = issue.end_row - 1 }).all
+  local function extent()
+    local wtop = vim.fn.win_screenpos(win)[1]
+    local pos = vim.fn.screenpos(win, issue.row, 1)
+    if pos.row == 0 then return nil end
+    local top = pos.row - wtop + 1 -- 1-based window line of the issue's first line
+    return top, top + h - 1
+  end
+  local function room(top, bottom)
+    if not top or bottom > wh then return nil end
+    if wh - bottom >= height + 2 then return "below" end
+    if top - 1 >= height + 2 then return "above" end
+  end
+
+  local top, bottom = extent()
+  local side = room(top, bottom)
+  if not side then
+    -- center the issue; failing that, put it at the top with a line of context
+    api.nvim_win_call(win, function() vim.cmd("normal! zz") end)
+    top, bottom = extent()
+    side = room(top, bottom)
+    if not side then
+      local ctx = (h + height + 3 <= wh) and 1 or 0
+      api.nvim_win_call(win, function()
+        vim.fn.winrestview({ topline = math.max(1, issue.row - ctx), topfill = 0 })
+      end)
+      top, bottom = extent()
+      side = room(top, bottom)
+    end
+  end
+
+  local pos = vim.fn.screenpos(win, issue.row, issue.col + 1)
+  local col = pos.col > 0 and (pos.col - vim.fn.win_screenpos(win)[2] - 2) or 0
+  col = math.max(0, math.min(col, ww - width - 2))
+  if side == "below" then return { row = bottom, col = col, anchor = "NW", height = height } end
+  if side == "above" then return { row = top - 1, col = col, anchor = "SW", height = height } end
+  -- no room for all of it: shrink the float below the issue, else cover its end
+  bottom = math.min(bottom or wh, wh)
+  if wh - bottom - 2 >= 3 then
+    return { row = bottom, col = col, anchor = "NW", height = wh - bottom - 2 }
+  end
+  return { row = wh, col = col, anchor = "SW", height = math.max(3, math.min(height, math.floor(wh / 2) - 2)) }
+end
+
 local function render(issue)
   local buf, win = S.buf, S.win
   S.issue = issue
   S.pos = { issue.row, issue.col }
 
-  -- Put the issue on screen and mark it.
+  -- Put the issue on screen (placed with the float below) and mark it.
   api.nvim_win_set_cursor(win, { issue.row, issue.col })
-  api.nvim_win_call(win, function()
-    vim.cmd("silent! normal! zv")
-    local wl, wh = vim.fn.winline(), api.nvim_win_get_height(0)
-    if wl < 3 or wl > wh - 3 then vim.cmd("normal! zz") end
-  end)
+  api.nvim_win_call(win, function() vim.cmd("silent! normal! zv") end)
   api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   api.nvim_buf_set_extmark(buf, ns, issue.row - 1, issue.col, {
     end_row = issue.end_row - 1, end_col = issue.end_col, hl_group = "SpellAuditWord", priority = 300,
@@ -232,13 +281,10 @@ local function render(issue)
     })
   end
 
-  -- Below the issue, or above it when there's no room.
-  local height = math.max(1, math.min(#lines, api.nvim_win_get_height(win) - 4))
-  local below = api.nvim_win_call(win, vim.fn.winline) + height + 3 <= api.nvim_win_get_height(win)
+  local p = W.place(win, issue, #lines, width)
   local cfg = {
-    relative = "win", win = win, bufpos = { issue.row - 1, issue.col },
-    row = below and 1 or 0, col = -2, anchor = below and "NW" or "SW",
-    width = width, height = height, border = "rounded", style = "minimal",
+    relative = "win", win = win, row = p.row, col = p.col, anchor = p.anchor,
+    width = width, height = p.height, border = "rounded", style = "minimal",
     title = (" %s %d/%d%s "):format(S.title, done() + 1, done() + S.remaining,
       S.needs > 0 and (" · %d need%s input"):format(S.needs, S.needs == 1 and "s" or "") or ""), title_pos = "left",
     footer = S.footer, footer_pos = "center",

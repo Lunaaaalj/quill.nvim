@@ -562,6 +562,18 @@ test("facts.invented: numbers, citations, placeholders; number words match digit
   eq(F.lost("See $a+b$ and \\ref{fig:1} at https://x.org.", "See it at https://x.org."), { "\\ref{fig:1}", "$a+b$" })
 end)
 
+test("facts.invented: changing only the decimal or thousands separator invents nothing", function()
+  local F = require("writing.facts")
+  eq(F.invented("a mean of 3.5 over 1.200 people", "una media de 3,5 sobre 1,200 personas"), {})
+  eq(F.invented("una media de 3,5", "a mean of 3.5"), {})
+  eq(F.invented("1,234.56 euros", "1.234,56 euros"), {})
+  eq(F.invented("1,200,000 cells", "1 200 000 cells"), {}, "space-grouped thousands")
+  eq(F.invented("1 200 cells", "1\226\128\175200 cells"), {}, "narrow no-break space")
+  eq(F.invented("0.5 s", "0,5 s"), {})
+  eq(F.invented("3,6", "3,5"), { "3,6" }, "a different number is still made up")
+  eq(F.invented("3.50", "3,5"), { "3.50" }, "an added digit is still made up")
+end)
+
 -- (each test uses its own paragraph: answers are cached per paragraph)
 local function needs_reply(sugg, needs)
   return function(o)
@@ -678,6 +690,41 @@ test("restyle: paragraph rewrites walked as a diff; invented rules and lost mark
   api.nvim_buf_set_lines(buf, 0, 1, false, { "The ball was thrown by the boy 3 times." })
   require("writing.restyle").check(buf, {}, function() end)
   eq(calls, 0, "served from the cache (unchanged paragraphs too)")
+end)
+
+test("walker: the float never covers the paragraph it shows", function()
+  vim.fn.writefile({ "- Use the active voice." }, conform_dir .. "/STYLE.md")
+  local lines = {}
+  for i = 1, 40 do lines[#lines + 1] = "Filler line " .. i .. "." end
+  local para = { "The ball was thrown by the boy.", "The cake was eaten by the girl.",
+    "The song was sung by the choir.", "The car was driven by the man." }
+  vim.list_extend(lines, { "" })
+  vim.list_extend(lines, para)
+  conform_buf(lines)
+  local win = api.nvim_get_current_win()
+  api.nvim_win_set_cursor(win, { 1, 0 })
+  -- the filler is one paragraph, ours the next: answer only for ours
+  reply = function(o)
+    local ps = {}
+    for p in o.prompt:gmatch("%[p(%d+)%]\nThe ball") do
+      ps[1] = { p = tonumber(p), needs = "", changes = { { rule = "Use the active voice.", change = "active voice" } },
+        rewrite = "The boy threw the ball.\nThe girl ate the cake.\nThe choir sang the song.\nThe man drove the car." }
+    end
+    return { paragraphs = ps }
+  end
+  vim.cmd("Writing restyle")
+  local S = W.current()
+  eq(S.title, "Restyle")
+  local cfg = api.nvim_win_get_config(S.float)
+  local wtop = vim.fn.win_screenpos(win)[1]
+  local top = vim.fn.screenpos(win, 42, 1).row - wtop + 1
+  local bottom = vim.fn.screenpos(win, 45, 1).row - wtop + 1
+  eq(top > 0 and bottom > 0, true, "the whole paragraph is on screen")
+  local rows = cfg.height + 2
+  local first = cfg.anchor == "NW" and cfg.row + 1 or cfg.row - rows + 1 -- 1-based window lines
+  local last = first + rows - 1
+  eq(last < top or first > bottom, true, ("float %d-%d overlaps the paragraph %d-%d"):format(first, last, top, bottom))
+  keys("q")
 end)
 
 test("restyle: a rewrite that makes up a figure is withheld and needs input", function()
